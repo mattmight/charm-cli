@@ -36,7 +36,7 @@ function loadUserConfig() {
 const defaultConfig = {
   port: 5002,
   hostname: 'localhost',
-  baseUrlPrefix: '/charm',
+  baseUrlPrefix: 'ai2',
   model: 'gpt-4o-mini'
 };
 
@@ -125,7 +125,46 @@ const command = parsed.command || 'help';
 const cmdArgs = parsed.commandArgs;
 
 // -----------------------------------------------------------------------------
-// 4) "run" Subcommand
+// 4) Helpers for attachments
+// -----------------------------------------------------------------------------
+function guessMimeType(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case '.png':
+      return 'image/png';
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.gif':
+      return 'image/gif';
+    // Expand if needed for more image formats:
+    default:
+      // Unknown, fallback
+      return null;
+  }
+}
+
+/**
+ * Return an object that matches the server's expectation for ImageAttachment:
+ *   { type: 'image', url: 'data:image/...base64,...' }
+ */
+function makeImageAttachment(filePath) {
+  const data = fs.readFileSync(filePath);
+  const b64 = data.toString('base64');
+  const mime = guessMimeType(filePath);
+  if (!mime) {
+    console.warn(`[WARN] Could not guess an image MIME type for file: ${filePath}`);
+    return null;
+  }
+  // Minimal change: use "url" instead of "dataUrl"
+  return {
+    type: 'image',
+    url: `data:${mime};base64,${b64}`
+  };
+}
+
+// -----------------------------------------------------------------------------
+// 5) "run" Subcommand
 // -----------------------------------------------------------------------------
 async function commandRun(globalFlags, cmdArgs) {
   let systemFile = null;
@@ -133,6 +172,9 @@ async function commandRun(globalFlags, cmdArgs) {
   let forceFormat = null;
   let forceSchemaFile = null;
   let leftoverMessage = null;
+
+  // We'll collect attachments in an array
+  const attachments = [];
 
   const localArgs = [...cmdArgs];
   while (localArgs.length > 0) {
@@ -145,6 +187,19 @@ async function commandRun(globalFlags, cmdArgs) {
       forceFormat = localArgs.shift();
     } else if (token === '--force-response-json-schema') {
       forceSchemaFile = localArgs.shift();
+    } else if (token === '--attach') {
+      const attachPath = localArgs.shift();
+      if (!attachPath) {
+        console.error('[ERROR] --attach requires a file path argument.');
+        process.exit(1);
+      }
+      // Currently only images
+      const attachObj = makeImageAttachment(attachPath);
+      if (!attachObj) {
+        console.error(`[ERROR] Could not attach file: ${attachPath}`);
+        process.exit(1);
+      }
+      attachments.push(attachObj);
     } else if (token.startsWith('--')) {
       console.error(`Unknown flag for "run": ${token}`);
       process.exit(1);
@@ -162,10 +217,12 @@ async function commandRun(globalFlags, cmdArgs) {
   } else if (userInputFile) {
     userMessage = fs.readFileSync(userInputFile, 'utf-8');
   } else {
+    // If there's no leftover message or file, see if stdin has data
     userMessage = await readAllStdin();
   }
-  if (!userMessage) {
-    console.error('[ERROR] No user message provided (empty).');
+
+  if (!userMessage && attachments.length === 0) {
+    console.error('[ERROR] No user message and no attachments provided.');
     process.exit(1);
   }
 
@@ -197,11 +254,28 @@ async function commandRun(globalFlags, cmdArgs) {
     };
   }
 
+  // Build the user content: it can be a single string, or an array mixing text & attachments
+  let userContent;
+  if (attachments.length === 0) {
+    // no attachments, just text
+    userContent = userMessage;
+  } else {
+    // mix text (if present) + attachments
+    const contentArr = [];
+    if (userMessage) {
+      contentArr.push(userMessage);
+    }
+    for (const att of attachments) {
+      contentArr.push(att);
+    }
+    userContent = contentArr;
+  }
+
   const payload = {
     model: globalFlags.model,
     transcript: {
       messages: [
-        { role: 'user', content: userMessage }
+        { role: 'user', content: userContent }
       ]
     }
   };
@@ -235,7 +309,14 @@ async function commandRun(globalFlags, cmdArgs) {
       if (typeof msg.content === 'string') {
         console.log(msg.content);
       } else if (Array.isArray(msg.content)) {
-        console.log(msg.content.join(' '));
+        // Possibly the assistant is returning an array of text/attachments
+        msg.content.forEach(segment => {
+          if (typeof segment === 'string') {
+            console.log(segment);
+          } else {
+            console.log(`[Attachment returned: ${JSON.stringify(segment)}]`);
+          }
+        });
       } else {
         console.log(String(msg.content));
       }
@@ -247,7 +328,7 @@ async function commandRun(globalFlags, cmdArgs) {
 }
 
 // -----------------------------------------------------------------------------
-// 5) "transcribe" Subcommand (Buffer PDF in memory + node-fetch + FormData)
+// 6) "transcribe" Subcommand
 // -----------------------------------------------------------------------------
 async function commandTranscribe(globalFlags, cmdArgs) {
   if (cmdArgs.length === 0) {
@@ -440,7 +521,7 @@ async function commandTranscribe(globalFlags, cmdArgs) {
 }
 
 // -----------------------------------------------------------------------------
-// 6) "extract-markdown" Subcommand
+// 7) "extract-markdown" Subcommand
 // -----------------------------------------------------------------------------
 async function commandExtractMarkdown(globalFlags, cmdArgs) {
   if (cmdArgs.length === 0) {
@@ -529,7 +610,7 @@ async function commandExtractMarkdown(globalFlags, cmdArgs) {
 }
 
 // -----------------------------------------------------------------------------
-// 6b) "convert-server-config" Subcommand
+// 8) "convert-server-config" Subcommand
 // -----------------------------------------------------------------------------
 
 // Helper to prompt user for a yes/no answer.
@@ -626,7 +707,7 @@ async function commandConvertServerConfig(globalFlags, cmdArgs) {
 }
 
 // -----------------------------------------------------------------------------
-// 7) Helpers
+// 9) Helpers
 // -----------------------------------------------------------------------------
 function showHelp() {
   console.log(`
@@ -645,6 +726,7 @@ Commands:
     --input-file <file>
     --force-response-format <format>
     --force-response-json-schema <file>
+    --attach <file>       (Attach image(s) to the user message)
 
   transcribe <file>.pdf [flags]
     --output <file>
@@ -665,6 +747,7 @@ Commands:
 
 Examples:
   charm run "Hello"
+  charm run --attach cat.png "Here's my cat!"
   charm --model gpt-4o run --system system.md --force-response-format json_object "Time?"
   charm transcribe mydoc.pdf --description "A PDF doc" --poll-interval 5
   charm extract-markdown sample.pdf
@@ -686,7 +769,7 @@ async function readAllStdin() {
 }
 
 // -----------------------------------------------------------------------------
-// 8) Main
+// 10) Main
 // -----------------------------------------------------------------------------
 async function main() {
   if (command === 'help' || command === null) {
