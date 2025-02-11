@@ -1,0 +1,20 @@
+{
+  "name": "charm-cli",
+  "version": "1.0.0",
+  "description": "A CLI for the charm server",
+  "main": "./charm",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "language",
+    "models"
+  ],
+  "author": "Matt Might",
+  "license": "ISC",
+  "dependencies": {
+    "fetch": "^1.1.0",
+    "form-data": "^4.0.1",
+    "node-fetch": "^3.3.2"
+  }
+}

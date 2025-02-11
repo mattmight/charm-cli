@@ -1,0 +1,615 @@
+#!/usr/bin/env node
+
+//
+// charm.mjs - ESM version that uses node-fetch without mixing require().
+//
+
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import readline from 'readline';
+import FormData from 'form-data';
+import fetch from 'node-fetch';
+import { fileURLToPath } from 'url';
+
+// We may need this for certain Node ESM behaviors (like __dirname). If needed:
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// -----------------------------------------------------------------------------
+// 1) Load user config from ~/.config/charm/config.json (if present)
+// -----------------------------------------------------------------------------
+function loadUserConfig() {
+  const configPath = path.join(os.homedir(), '.config', 'charm', 'config.json');
+  let userConfig = {};
+  try {
+    if (fs.existsSync(configPath)) {
+      const text = fs.readFileSync(configPath, 'utf-8');
+      userConfig = JSON.parse(text);
+    }
+  } catch (err) {
+    console.warn(`[WARN] Could not parse config at ${configPath}:`, err.message);
+  }
+  return userConfig;
+}
+
+const defaultConfig = {
+  port: 5002,
+  hostname: 'localhost',
+  baseUrlPrefix: 'ai2',
+  model: 'gpt-4o-mini'
+};
+const userConfig = loadUserConfig();
+const mergedConfig = { ...defaultConfig, ...userConfig };
+
+// -----------------------------------------------------------------------------
+// 2) Parse Command-Line Arguments (global + subcommand)
+// -----------------------------------------------------------------------------
+function parseArgs(argv) {
+  const args = [...argv];
+  const parsed = {
+    _global: {},
+    command: null,
+    commandArgs: []
+  };
+
+  function nextArg() {
+    return args.shift();
+  }
+
+  // Remove "node" + script name if present
+  if (args[0] && args[0].match(/node(\.exe)?$/i)) args.shift();
+  if (args[0] && path.basename(args[0]) === path.basename(__filename)) args.shift();
+
+  // Parse global flags
+  while (args.length > 0) {
+    if (!args[0].startsWith('--')) {
+      // The first non-flag token is subcommand
+      parsed.command = args.shift();
+      break;
+    }
+    const flag = args.shift();
+    switch (flag) {
+      case '--base-url-prefix':
+        parsed._global.baseUrlPrefix = nextArg();
+        break;
+      case '--model':
+        parsed._global.model = nextArg();
+        break;
+      case '--port':
+        parsed._global.port = parseInt(nextArg(), 10);
+        break;
+      case '--hostname':
+        parsed._global.hostname = nextArg();
+        break;
+      default:
+        console.error(`Unknown global flag: ${flag}`);
+        process.exit(1);
+    }
+  }
+
+  if (!parsed.command && args.length > 0) {
+    parsed.command = args.shift();
+  }
+  parsed.commandArgs = args;
+  return parsed;
+}
+
+const parsed = parseArgs(process.argv);
+
+// -----------------------------------------------------------------------------
+// 3) Merge final global flags
+// -----------------------------------------------------------------------------
+const finalGlobalFlags = {
+  port: mergedConfig.port,
+  hostname: mergedConfig.hostname,
+  baseUrlPrefix: mergedConfig.baseUrlPrefix,
+  model: mergedConfig.model
+};
+
+if (typeof parsed._global.port === 'number') {
+  finalGlobalFlags.port = parsed._global.port;
+}
+if (typeof parsed._global.hostname === 'string') {
+  finalGlobalFlags.hostname = parsed._global.hostname;
+}
+if (typeof parsed._global.baseUrlPrefix === 'string') {
+  finalGlobalFlags.baseUrlPrefix = parsed._global.baseUrlPrefix;
+}
+if (typeof parsed._global.model === 'string') {
+  finalGlobalFlags.model = parsed._global.model;
+}
+
+const command = parsed.command || 'help';
+const cmdArgs = parsed.commandArgs;
+
+// -----------------------------------------------------------------------------
+// 4) "run" Subcommand
+// -----------------------------------------------------------------------------
+async function commandRun(globalFlags, cmdArgs) {
+  let systemFile = null;
+  let userInputFile = null;
+  let forceFormat = null;
+  let forceSchemaFile = null;
+  let leftoverMessage = null;
+
+  const localArgs = [...cmdArgs];
+  while (localArgs.length > 0) {
+    const token = localArgs.shift();
+    if (token === '--system') {
+      systemFile = localArgs.shift();
+    } else if (token === '--input-file') {
+      userInputFile = localArgs.shift();
+    } else if (token === '--force-response-format') {
+      forceFormat = localArgs.shift();
+    } else if (token === '--force-response-json-schema') {
+      forceSchemaFile = localArgs.shift();
+    } else if (token.startsWith('--')) {
+      console.error(`Unknown flag for "run": ${token}`);
+      process.exit(1);
+    } else {
+      // remainder is the user message
+      leftoverMessage = token + ' ' + localArgs.join(' ');
+      localArgs.length = 0;
+    }
+  }
+
+  // Resolve user message
+  let userMessage = '';
+  if (leftoverMessage) {
+    userMessage = leftoverMessage.trim();
+  } else if (userInputFile) {
+    userMessage = fs.readFileSync(userInputFile, 'utf-8');
+  } else {
+    userMessage = await readAllStdin();
+  }
+  if (!userMessage) {
+    console.error('[ERROR] No user message provided (empty).');
+    process.exit(1);
+  }
+
+  let systemText = null;
+  if (systemFile) {
+    systemText = fs.readFileSync(systemFile, 'utf-8');
+  }
+
+  const invocationOptions = {};
+  if (forceFormat && forceSchemaFile) {
+    console.error('[ERROR] Cannot specify both --force-response-format and --force-response-json-schema.');
+    process.exit(1);
+  }
+  if (forceFormat) {
+    invocationOptions.response_format = { type: forceFormat };
+  }
+  if (forceSchemaFile) {
+    const schemaText = fs.readFileSync(forceSchemaFile, 'utf-8');
+    let schemaObj = null;
+    try {
+      schemaObj = JSON.parse(schemaText);
+    } catch (err) {
+      console.error(`[ERROR] Could not parse JSON schema from file ${forceSchemaFile}`);
+      process.exit(1);
+    }
+    invocationOptions.response_format = {
+      type: 'json_schema',
+      json_schema: { name: "forced-schema", schema: schemaObj }
+    };
+  }
+
+  const payload = {
+    model: globalFlags.model,
+    transcript: {
+      messages: [
+        { role: 'user', content: userMessage }
+      ]
+    }
+  };
+  if (systemText) {
+    payload.system = systemText;
+  }
+  if (Object.keys(invocationOptions).length > 0) {
+    payload.options = invocationOptions;
+  }
+
+  const endpoint = `http://${globalFlags.hostname}:${globalFlags.port}/${globalFlags.baseUrlPrefix}/api/charmonator/v1/chat/extend_transcript`;
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) {
+      const errBody = await response.text();
+      console.error(`[ERROR] HTTP ${response.status} => ${errBody}`);
+      process.exit(1);
+    }
+    const resultJson = await response.json();
+    // typically { messages: [...] }
+    const assistantMessages = (resultJson.messages || []).filter(m => m.role === 'assistant');
+    if (assistantMessages.length === 0) {
+      console.log('(No assistant message returned.)');
+      return;
+    }
+    for (const msg of assistantMessages) {
+      if (typeof msg.content === 'string') {
+        console.log(msg.content);
+      } else if (Array.isArray(msg.content)) {
+        console.log(msg.content.join(' '));
+      } else {
+        console.log(String(msg.content));
+      }
+    }
+  } catch (err) {
+    console.error('[ERROR] Failed to call /chat/extend_transcript:', err.message);
+    process.exit(1);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 5) "transcribe" Subcommand (Buffer PDF in memory + node-fetch + FormData)
+// -----------------------------------------------------------------------------
+async function commandTranscribe(globalFlags, cmdArgs) {
+  if (cmdArgs.length === 0) {
+    console.error('[ERROR] No PDF file specified.');
+    process.exit(1);
+  }
+  const pdfPath = cmdArgs[0];
+  if (!pdfPath.toLowerCase().endsWith('.pdf')) {
+    console.error('[ERROR] "transcribe" expects a .pdf file input.');
+    process.exit(1);
+  }
+
+  let outputPath = pdfPath.replace(/\.pdf$/i, '.doc.json');
+  let description = null;
+  let intent = null;
+  let graphicInstructions = null;
+  let detectDocBoundaries = false;
+  let pageNumbering = true;
+  let ocrThreshold = 1.0;
+  let pollInterval = 3;
+
+  const localArgs = cmdArgs.slice(1);
+  while (localArgs.length > 0) {
+    const token = localArgs.shift();
+    switch (token) {
+      case '--output':
+        outputPath = localArgs.shift();
+        break;
+      case '--description':
+        description = localArgs.shift();
+        break;
+      case '--intent':
+        intent = localArgs.shift();
+        break;
+      case '--graphic-instructions':
+        graphicInstructions = localArgs.shift();
+        break;
+      case '--detect-document-boundaries':
+        detectDocBoundaries = true;
+        break;
+      case '--no-page-numbering':
+        pageNumbering = false;
+        break;
+      case '--ocr-threshold':
+        ocrThreshold = localArgs.shift();
+        break;
+      case '--poll-interval':
+        pollInterval = parseFloat(localArgs.shift());
+        if (isNaN(pollInterval) || pollInterval <= 0) {
+          console.error('[ERROR] Invalid --poll-interval.');
+          process.exit(1);
+        }
+        break;
+      default:
+        console.error(`[ERROR] Unknown flag for "transcribe": ${token}`);
+        process.exit(1);
+    }
+  }
+
+  // Read PDF into memory
+  let pdfBuffer;
+  try {
+    pdfBuffer = fs.readFileSync(pdfPath);
+  } catch (err) {
+    console.error(`[ERROR] Could not read file at ${pdfPath}`, err.message);
+    process.exit(1);
+  }
+
+  // Build form data
+  const form = new FormData();
+  form.append('file', pdfBuffer, path.basename(pdfPath));
+  form.append('model', globalFlags.model);
+
+  if (description) form.append('description', description);
+  if (intent) form.append('intent', intent);
+  if (graphicInstructions) form.append('graphic_instructions', graphicInstructions);
+  if (detectDocBoundaries) form.append('detect_document_boundaries', 'true');
+  if (!pageNumbering) form.append('page_numbering', 'false');
+  if (ocrThreshold !== null) form.append('ocr_threshold', ocrThreshold);
+
+  console.log('Starting PDF conversion with options:\n', {
+    model: globalFlags.model,
+    description,
+    intent,
+    graphicInstructions,
+    detect_document_boundaries: detectDocBoundaries,
+    page_numbering: pageNumbering,
+    ocr_threshold: ocrThreshold
+  });
+
+  // Compute content length
+  let length;
+  try {
+    length = form.getLengthSync();
+  } catch (err) {
+    console.error('[ERROR] form.getLengthSync() failed:', err.message);
+    process.exit(1);
+  }
+  const headers = {
+    ...form.getHeaders(),
+    'Content-Length': length
+  };
+
+  const endpoint = `http://${globalFlags.hostname}:${globalFlags.port}/${globalFlags.baseUrlPrefix}/api/charmonizer/v1/conversions/documents`;
+
+  let jobId;
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      body: form,
+      headers
+    });
+    if (!response.ok) {
+      const errBody = await response.text();
+      console.error(`[ERROR] HTTP ${response.status} => ${errBody}`);
+      process.exit(1);
+    }
+    const result = await response.json();
+    if (!result.job_id) {
+      console.error('[ERROR] No job_id returned by the server.');
+      process.exit(1);
+    }
+    jobId = result.job_id;
+  } catch (err) {
+    console.error('[ERROR] Failed to start PDF conversion:', err.message);
+    process.exit(1);
+  }
+
+  // Poll for progress
+  const statusUrl = `http://${globalFlags.hostname}:${globalFlags.port}/${globalFlags.baseUrlPrefix}/api/charmonizer/v1/conversions/documents/${jobId}`;
+  const resultUrl = `${statusUrl}/result`;
+
+  while (true) {
+    await sleep(pollInterval);
+
+    let statusRes;
+    try {
+      const resp = await fetch(statusUrl);
+      if (!resp.ok) {
+        const errBody = await resp.text();
+        console.error(`[ERROR] Polling => HTTP ${resp.status} => ${errBody}`);
+        process.exit(1);
+      }
+      statusRes = await resp.json();
+    } catch (err) {
+      console.error('[ERROR] Polling job status failed:', err.message);
+      process.exit(1);
+    }
+
+    if (statusRes.status === 'error') {
+      console.error('[ERROR] Job error:', statusRes.error);
+      process.exit(1);
+    } else if (statusRes.status === 'complete') {
+      console.log('Conversion complete! Fetching final result...');
+      break;
+    } else {
+      const pagesTotal = statusRes.pages_total || 0;
+      const pagesConverted = statusRes.pages_converted || 0;
+      console.log(`Progress: ${pagesConverted}/${pagesTotal} pages... (status=${statusRes.status})`);
+    }
+  }
+
+  // Fetch final doc object
+  let finalDoc;
+  try {
+    const resp = await fetch(resultUrl);
+    if (!resp.ok && resp.status !== 202) {
+      const errBody = await resp.text();
+      console.error(`[ERROR] Could not retrieve final => HTTP ${resp.status} => ${errBody}`);
+      process.exit(1);
+    }
+    if (resp.status === 202) {
+      console.warn('[WARN] Still processing, got 202. Exiting with error code.');
+      process.exit(1);
+    }
+    finalDoc = await resp.json();
+  } catch (err) {
+    console.error('[ERROR] Failed to fetch final doc object:', err.message);
+    process.exit(1);
+  }
+
+  // Write output
+  try {
+    fs.writeFileSync(outputPath, JSON.stringify(finalDoc, null, 2), 'utf-8');
+    console.log(`Saved final doc to ${outputPath}`);
+  } catch (err) {
+    console.error('[ERROR] Could not write output:', err.message);
+    process.exit(1);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 6) NEW: "extract-markdown" Subcommand
+// -----------------------------------------------------------------------------
+async function commandExtractMarkdown(globalFlags, cmdArgs) {
+  if (cmdArgs.length === 0) {
+    console.error('[ERROR] No input file specified for "extract-markdown".');
+    process.exit(1);
+  }
+  const inputPath = cmdArgs[0];
+
+  // Default output path: replace extension with .md
+  let defaultOutput = inputPath + '.md';
+  const ext = path.extname(inputPath);
+  if (ext) {
+    defaultOutput = inputPath.slice(0, -ext.length) + '.md';
+  }
+
+  let outputPath = defaultOutput;
+
+  // Parse any local flags
+  const localArgs = cmdArgs.slice(1);
+  while (localArgs.length > 0) {
+    const token = localArgs.shift();
+    switch (token) {
+      case '--output':
+        outputPath = localArgs.shift();
+        break;
+      default:
+        console.error(`[ERROR] Unknown flag for "extract-markdown": ${token}`);
+        process.exit(1);
+    }
+  }
+
+  // Validate that the file exists
+  let fileBuffer;
+  try {
+    fileBuffer = fs.readFileSync(inputPath);
+  } catch (err) {
+    console.error(`[ERROR] Could not read file at ${inputPath}`, err.message);
+    process.exit(1);
+  }
+
+  // Build the form data
+  const form = new FormData();
+  form.append('file', fileBuffer, path.basename(inputPath));
+
+  const endpoint = `http://${globalFlags.hostname}:${globalFlags.port}/${globalFlags.baseUrlPrefix}/api/charmonator/v1/conversion/file`;
+
+  // POST to /conversion/file
+  let responseJson;
+  try {
+    const length = form.getLengthSync();
+    const headers = {
+      ...form.getHeaders(),
+      'Content-Length': length
+    };
+
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      body: form,
+      headers
+    });
+    if (!resp.ok) {
+      const errBody = await resp.text();
+      console.error(`[ERROR] /conversion/file => HTTP ${resp.status} => ${errBody}`);
+      process.exit(1);
+    }
+    responseJson = await resp.json();
+  } catch (err) {
+    console.error('[ERROR] Failed to call /conversion/file:', err.message);
+    process.exit(1);
+  }
+
+  // Expect {"markdownContent": "..."}
+  if (!responseJson || typeof responseJson.markdownContent !== 'string') {
+    console.error('[ERROR] Response missing "markdownContent" field.');
+    process.exit(1);
+  }
+
+  // Write the Markdown output
+  try {
+    fs.writeFileSync(outputPath, responseJson.markdownContent, 'utf-8');
+    console.log(`Extracted markdown saved to: ${outputPath}`);
+  } catch (err) {
+    console.error('[ERROR] Could not write Markdown output:', err.message);
+    process.exit(1);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 7) Helpers
+// -----------------------------------------------------------------------------
+function showHelp() {
+  console.log(`
+Usage:
+  charm [global-flags] <command> [options...]
+
+Global Flags:
+  --base-url-prefix <prefix>   (Default: "ai2" or config-file override)
+  --model <modelName>          (Default: "gpt-4o-mini" or config-file override)
+  --port <number>              (Default: 5002 or config-file override)
+  --hostname <name>            (Default: "localhost" or config-file override)
+
+Commands:
+  run [flags] [<user message>]
+    --system <file>      Provide system instructions
+    --input-file <file>  Provide user message from file
+    --force-response-format <format>
+    --force-response-json-schema <file>
+
+  transcribe <file>.pdf [flags]
+    --output <file>                Default: <file>.doc.json
+    --description <string>
+    --intent <string>
+    --graphic-instructions <str>
+    --detect-document-boundaries
+    --no-page-numbering
+    --ocr-threshold <float>        Default 1.0 (no OCR), Range: 0.0 to 1.0
+    --poll-interval <seconds>      Default 3
+
+  extract-markdown <file> [flags]
+    --output <file>                Default: <file>.md
+
+Examples:
+  charm run "Hello"
+  charm --model gpt-4o run --system system.md --force-response-format json_object "Time?"
+  charm transcribe mydoc.pdf --description "A PDF doc" --poll-interval 5
+  charm extract-markdown sample.pdf
+  charm extract-markdown sample.doc.json --output out.md
+`);
+}
+
+function sleep(seconds) {
+  return new Promise(resolve => setTimeout(resolve, seconds * 1000));
+}
+
+async function readAllStdin() {
+  const rl = readline.createInterface({ input: process.stdin });
+  let data = '';
+  for await (const line of rl) {
+    data += line + '\n';
+  }
+  return data.trim();
+}
+
+// -----------------------------------------------------------------------------
+// 8) Main
+// -----------------------------------------------------------------------------
+async function main() {
+  if (command === 'help' || command === null) {
+    showHelp();
+    process.exit(0);
+  }
+
+  switch (command) {
+    case 'run':
+      await commandRun(finalGlobalFlags, cmdArgs);
+      break;
+    case 'transcribe':
+      await commandTranscribe(finalGlobalFlags, cmdArgs);
+      break;
+    case 'extract-markdown':
+      await commandExtractMarkdown(finalGlobalFlags, cmdArgs);
+      break;
+    default:
+      console.error(`[ERROR] Unknown command: ${command}`);
+      showHelp();
+      process.exit(1);
+  }
+}
+
+main().catch(err => {
+  console.error('[ERROR] Uncaught exception in charm script:', err);
+  process.exit(1);
+});
