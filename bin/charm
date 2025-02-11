@@ -12,7 +12,7 @@ import FormData from 'form-data';
 import fetch from 'node-fetch';
 import { fileURLToPath } from 'url';
 
-// We may need this for certain Node ESM behaviors (like __dirname). If needed:
+// For certain Node ESM behaviors (like __dirname):
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -36,9 +36,10 @@ function loadUserConfig() {
 const defaultConfig = {
   port: 5002,
   hostname: 'localhost',
-  baseUrlPrefix: 'ai2',
+  baseUrlPrefix: '/charm',
   model: 'gpt-4o-mini'
 };
+
 const userConfig = loadUserConfig();
 const mergedConfig = { ...defaultConfig, ...userConfig };
 
@@ -192,7 +193,7 @@ async function commandRun(globalFlags, cmdArgs) {
     }
     invocationOptions.response_format = {
       type: 'json_schema',
-      json_schema: { name: "forced-schema", schema: schemaObj }
+      json_schema: { name: 'forced-schema', schema: schemaObj }
     };
   }
 
@@ -211,7 +212,7 @@ async function commandRun(globalFlags, cmdArgs) {
     payload.options = invocationOptions;
   }
 
-  const endpoint = `http://${globalFlags.hostname}:${globalFlags.port}/${globalFlags.baseUrlPrefix}/api/charmonator/v1/chat/extend_transcript`;
+  const endpoint = `http://${globalFlags.hostname}:${globalFlags.port}${globalFlags.baseUrlPrefix}/api/charmonator/v1/chat/extend_transcript`;
   try {
     const response = await fetch(endpoint, {
       method: 'POST',
@@ -350,7 +351,7 @@ async function commandTranscribe(globalFlags, cmdArgs) {
     'Content-Length': length
   };
 
-  const endpoint = `http://${globalFlags.hostname}:${globalFlags.port}/${globalFlags.baseUrlPrefix}/api/charmonizer/v1/conversions/documents`;
+  const endpoint = `http://${globalFlags.hostname}:${globalFlags.port}${globalFlags.baseUrlPrefix}/api/charmonizer/v1/conversions/documents`;
 
   let jobId;
   try {
@@ -376,7 +377,7 @@ async function commandTranscribe(globalFlags, cmdArgs) {
   }
 
   // Poll for progress
-  const statusUrl = `http://${globalFlags.hostname}:${globalFlags.port}/${globalFlags.baseUrlPrefix}/api/charmonizer/v1/conversions/documents/${jobId}`;
+  const statusUrl = `http://${globalFlags.hostname}:${globalFlags.port}${globalFlags.baseUrlPrefix}/api/charmonizer/v1/conversions/documents/${jobId}`;
   const resultUrl = `${statusUrl}/result`;
 
   while (true) {
@@ -439,7 +440,7 @@ async function commandTranscribe(globalFlags, cmdArgs) {
 }
 
 // -----------------------------------------------------------------------------
-// 6) NEW: "extract-markdown" Subcommand
+// 6) "extract-markdown" Subcommand
 // -----------------------------------------------------------------------------
 async function commandExtractMarkdown(globalFlags, cmdArgs) {
   if (cmdArgs.length === 0) {
@@ -484,7 +485,7 @@ async function commandExtractMarkdown(globalFlags, cmdArgs) {
   const form = new FormData();
   form.append('file', fileBuffer, path.basename(inputPath));
 
-  const endpoint = `http://${globalFlags.hostname}:${globalFlags.port}/${globalFlags.baseUrlPrefix}/api/charmonator/v1/conversion/file`;
+  const endpoint = `http://${globalFlags.hostname}:${globalFlags.port}${globalFlags.baseUrlPrefix}/api/charmonator/v1/conversion/file`;
 
   // POST to /conversion/file
   let responseJson;
@@ -528,6 +529,103 @@ async function commandExtractMarkdown(globalFlags, cmdArgs) {
 }
 
 // -----------------------------------------------------------------------------
+// 6b) "convert-server-config" Subcommand
+// -----------------------------------------------------------------------------
+
+// Helper to prompt user for a yes/no answer.
+function promptYesNo(question) {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+  return new Promise(resolve => {
+    rl.question(question, answer => {
+      rl.close();
+      resolve(answer.trim().toLowerCase());
+    });
+  });
+}
+
+async function commandConvertServerConfig(globalFlags, cmdArgs) {
+  if (cmdArgs.length < 1) {
+    console.error('[ERROR] No path to server config.json provided.');
+    process.exit(1);
+  }
+  const serverConfigPath = cmdArgs[0];
+
+  // Read server config
+  let serverConf;
+  try {
+    const raw = fs.readFileSync(serverConfigPath, 'utf-8');
+    serverConf = JSON.parse(raw);
+  } catch (err) {
+    console.error(`[ERROR] Could not read/parse server config at ${serverConfigPath}:`, err.message);
+    process.exit(1);
+  }
+
+  // Build minimal local config
+  const localConf = {};
+
+  // 1) Pull port from serverConf.server.port if present
+  if (serverConf.server && typeof serverConf.server.port === 'number') {
+    localConf.port = serverConf.server.port;
+  } else {
+    localConf.port = 5002;
+  }
+
+  // 2) Use hostname = 'localhost' by default
+  localConf.hostname = 'localhost';
+
+  // 3) If there's a baseUrl like "/ai2", turn that into 'ai2' for baseUrlPrefix
+  const rawBaseUrl =
+    serverConf.server && serverConf.server.baseUrl
+      ? serverConf.server.baseUrl
+      : '/ai2';
+  localConf.baseUrlPrefix = rawBaseUrl.replace(/^\/+/, '');
+
+  // 4) Attempt to pick a default model (first in serverConf.models) or fallback
+  if (serverConf.models && typeof serverConf.models === 'object') {
+    const modelNames = Object.keys(serverConf.models);
+    if (modelNames.length > 0) {
+      localConf.model = modelNames[0];
+    }
+  }
+  if (!localConf.model) {
+    localConf.model = 'gpt-4o-mini';
+  }
+
+  // Prepare directory & path for writing
+  const charmDir = path.join(os.homedir(), '.config', 'charm');
+  const localPath = path.join(charmDir, 'config.json');
+
+  // If config file already exists, confirm overwriting
+  if (fs.existsSync(localPath)) {
+    console.log(`[INFO] A local config file already exists at: ${localPath}`);
+    const answer = await promptYesNo('Overwrite? [y/N]: ');
+    if (answer !== 'y') {
+      console.log('Aborted.');
+      process.exit(0);
+    }
+  }
+
+  try {
+    fs.mkdirSync(charmDir, { recursive: true });
+  } catch (err) {
+    // might fail if the directory already exists
+  }
+
+  // Write local config
+  try {
+    fs.writeFileSync(localPath, JSON.stringify(localConf, null, 2), 'utf-8');
+    console.log(`Wrote local charm config to: ${localPath}`);
+    console.log('Done.');
+  } catch (err) {
+    console.error('[ERROR] Could not write local charm config:', err.message);
+    process.exit(1);
+  }
+}
+
+// -----------------------------------------------------------------------------
 // 7) Helpers
 // -----------------------------------------------------------------------------
 function showHelp() {
@@ -536,37 +634,41 @@ Usage:
   charm [global-flags] <command> [options...]
 
 Global Flags:
-  --base-url-prefix <prefix>   (Default: "ai2" or config-file override)
-  --model <modelName>          (Default: "gpt-4o-mini" or config-file override)
-  --port <number>              (Default: 5002 or config-file override)
-  --hostname <name>            (Default: "localhost" or config-file override)
+  --base-url-prefix <prefix>   (Default: "ai2" or config override)
+  --model <modelName>          (Default: "gpt-4o-mini" or config override)
+  --port <number>              (Default: 5002 or config override)
+  --hostname <name>            (Default: "localhost" or config override)
 
 Commands:
   run [flags] [<user message>]
-    --system <file>      Provide system instructions
-    --input-file <file>  Provide user message from file
+    --system <file>
+    --input-file <file>
     --force-response-format <format>
     --force-response-json-schema <file>
 
   transcribe <file>.pdf [flags]
-    --output <file>                Default: <file>.doc.json
+    --output <file>
     --description <string>
     --intent <string>
     --graphic-instructions <str>
     --detect-document-boundaries
     --no-page-numbering
-    --ocr-threshold <float>        Default 1.0 (no OCR), Range: 0.0 to 1.0
-    --poll-interval <seconds>      Default 3
+    --ocr-threshold <float>
+    --poll-interval <seconds>
 
   extract-markdown <file> [flags]
-    --output <file>                Default: <file>.md
+    --output <file>
+
+  convert-server-config <path-to-charm-server-conf/config.json>
+    Generates a minimal ~/.config/charm/config.json for the CLI
+    based on the server config (used by charmonator/charmonizer).
 
 Examples:
   charm run "Hello"
   charm --model gpt-4o run --system system.md --force-response-format json_object "Time?"
   charm transcribe mydoc.pdf --description "A PDF doc" --poll-interval 5
   charm extract-markdown sample.pdf
-  charm extract-markdown sample.doc.json --output out.md
+  charm convert-server-config /path/to/server/config.json
 `);
 }
 
@@ -601,6 +703,9 @@ async function main() {
       break;
     case 'extract-markdown':
       await commandExtractMarkdown(finalGlobalFlags, cmdArgs);
+      break;
+    case 'convert-server-config':
+      await commandConvertServerConfig(finalGlobalFlags, cmdArgs);
       break;
     default:
       console.error(`[ERROR] Unknown command: ${command}`);
