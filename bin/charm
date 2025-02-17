@@ -1,9 +1,5 @@
 #!/usr/bin/env node
 
-//
-// charm.mjs - ESM version that uses node-fetch without mixing require().
-//
-
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -36,7 +32,7 @@ function loadUserConfig() {
 const defaultConfig = {
   port: 5002,
   hostname: 'localhost',
-  baseUrlPrefix: 'ai2',
+  baseUrlPrefix: '/charm',
   model: 'gpt-4o-mini'
 };
 
@@ -65,7 +61,7 @@ function parseArgs(argv) {
   // Parse global flags
   while (args.length > 0) {
     if (!args[0].startsWith('--')) {
-      // The first non-flag token is subcommand
+      // The first non-flag token is the subcommand
       parsed.command = args.shift();
       break;
     }
@@ -125,7 +121,7 @@ const command = parsed.command || 'help';
 const cmdArgs = parsed.commandArgs;
 
 // -----------------------------------------------------------------------------
-// 4) Helpers for attachments
+// 4) Helpers for attachments, prompts, etc.
 // -----------------------------------------------------------------------------
 function guessMimeType(filePath) {
   const ext = path.extname(filePath).toLowerCase();
@@ -137,17 +133,11 @@ function guessMimeType(filePath) {
       return 'image/jpeg';
     case '.gif':
       return 'image/gif';
-    // Expand if needed for more image formats:
     default:
-      // Unknown, fallback
       return null;
   }
 }
 
-/**
- * Return an object that matches the server's expectation for ImageAttachment:
- *   { type: 'image', url: 'data:image/...base64,...' }
- */
 function makeImageAttachment(filePath) {
   const data = fs.readFileSync(filePath);
   const b64 = data.toString('base64');
@@ -156,11 +146,31 @@ function makeImageAttachment(filePath) {
     console.warn(`[WARN] Could not guess an image MIME type for file: ${filePath}`);
     return null;
   }
-  // Minimal change: use "url" instead of "dataUrl"
   return {
     type: 'image',
     url: `data:${mime};base64,${b64}`
   };
+}
+
+// Helper to read all lines from stdin
+async function readAllStdin() {
+  const rl = readline.createInterface({ input: process.stdin });
+  let data = '';
+  for await (const line of rl) {
+    data += line + '\n';
+  }
+  return data.trim();
+}
+
+// A small wrapper to use readline in async style
+function questionAsync(rl, prompt) {
+  return new Promise(resolve => {
+    rl.question(prompt, answer => resolve(answer));
+  });
+}
+
+function sleep(seconds) {
+  return new Promise(resolve => setTimeout(resolve, seconds * 1000));
 }
 
 // -----------------------------------------------------------------------------
@@ -173,10 +183,9 @@ async function commandRun(globalFlags, cmdArgs) {
   let forceSchemaFile = null;
   let leftoverMessage = null;
 
-  // We'll collect attachments in an array
   const attachments = [];
-
   const localArgs = [...cmdArgs];
+
   while (localArgs.length > 0) {
     const token = localArgs.shift();
     if (token === '--system') {
@@ -193,7 +202,6 @@ async function commandRun(globalFlags, cmdArgs) {
         console.error('[ERROR] --attach requires a file path argument.');
         process.exit(1);
       }
-      // Currently only images
       const attachObj = makeImageAttachment(attachPath);
       if (!attachObj) {
         console.error(`[ERROR] Could not attach file: ${attachPath}`);
@@ -204,7 +212,7 @@ async function commandRun(globalFlags, cmdArgs) {
       console.error(`Unknown flag for "run": ${token}`);
       process.exit(1);
     } else {
-      // remainder is the user message
+      // remainder is user message
       leftoverMessage = token + ' ' + localArgs.join(' ');
       localArgs.length = 0;
     }
@@ -217,7 +225,7 @@ async function commandRun(globalFlags, cmdArgs) {
   } else if (userInputFile) {
     userMessage = fs.readFileSync(userInputFile, 'utf-8');
   } else {
-    // If there's no leftover message or file, see if stdin has data
+    // If there's no leftover message or file, try stdin
     userMessage = await readAllStdin();
   }
 
@@ -231,11 +239,12 @@ async function commandRun(globalFlags, cmdArgs) {
     systemText = fs.readFileSync(systemFile, 'utf-8');
   }
 
-  const invocationOptions = {};
   if (forceFormat && forceSchemaFile) {
     console.error('[ERROR] Cannot specify both --force-response-format and --force-response-json-schema.');
     process.exit(1);
   }
+
+  const invocationOptions = {};
   if (forceFormat) {
     invocationOptions.response_format = { type: forceFormat };
   }
@@ -254,21 +263,19 @@ async function commandRun(globalFlags, cmdArgs) {
     };
   }
 
-  // Build the user content: it can be a single string, or an array mixing text & attachments
+  // Build the user content
   let userContent;
   if (attachments.length === 0) {
-    // no attachments, just text
     userContent = userMessage;
   } else {
-    // mix text (if present) + attachments
-    const contentArr = [];
+    const arr = [];
     if (userMessage) {
-      contentArr.push(userMessage);
+      arr.push(userMessage);
     }
     for (const att of attachments) {
-      contentArr.push(att);
+      arr.push(att);
     }
-    userContent = contentArr;
+    userContent = arr;
   }
 
   const payload = {
@@ -309,7 +316,6 @@ async function commandRun(globalFlags, cmdArgs) {
       if (typeof msg.content === 'string') {
         console.log(msg.content);
       } else if (Array.isArray(msg.content)) {
-        // Possibly the assistant is returning an array of text/attachments
         msg.content.forEach(segment => {
           if (typeof segment === 'string') {
             console.log(segment);
@@ -328,20 +334,123 @@ async function commandRun(globalFlags, cmdArgs) {
 }
 
 // -----------------------------------------------------------------------------
+// 5b) "chat" Subcommand (New): Interactive chat loop
+// -----------------------------------------------------------------------------
+async function commandChat(globalFlags, cmdArgs) {
+  // Optionally accept a system prompt file: --system <path>
+  let systemFile = null;
+  const localArgs = [...cmdArgs];
+  while (localArgs.length > 0) {
+    if (localArgs[0] === '--system') {
+      localArgs.shift();
+      systemFile = localArgs.shift();
+    } else {
+      console.error(`[ERROR] Unknown flag for "chat": ${localArgs[0]}`);
+      process.exit(1);
+    }
+  }
+
+  let systemText = null;
+  if (systemFile) {
+    try {
+      systemText = fs.readFileSync(systemFile, 'utf-8');
+    } catch (err) {
+      console.error(`[ERROR] Could not read --system file: ${systemFile}\n`, err.message);
+      process.exit(1);
+    }
+  }
+
+  // We'll maintain a transcript object in memory:
+  const transcript = { messages: [] };
+
+  console.log('Entering chat mode. Type "exit" or "quit" to end.\n');
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+  while (true) {
+    const userInput = await questionAsync(rl, '> ');
+    if (!userInput.trim()) continue;
+    if (userInput.toLowerCase() === 'exit' || userInput.toLowerCase() === 'quit') {
+      console.log('Exiting chat.');
+      break;
+    }
+
+    // Add user message to the transcript
+    transcript.messages.push({ role: 'user', content: userInput });
+
+    // Prepare request payload
+    const payload = {
+      model: globalFlags.model,
+      transcript,
+      options: { stream: false }
+    };
+    if (systemText) {
+      payload.system = systemText;
+    }
+
+    // Call /chat/extend_transcript
+    const endpoint = `http://${globalFlags.hostname}:${globalFlags.port}${globalFlags.baseUrlPrefix}/api/charmonator/v1/chat/extend_transcript`;
+    let resultJson;
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) {
+        const errBody = await response.text();
+        console.error(`[ERROR] HTTP ${response.status} => ${errBody}`);
+        continue;
+      }
+      resultJson = await response.json();
+    } catch (err) {
+      console.error('[ERROR] Failed to call /chat/extend_transcript:', err.message);
+      continue;
+    }
+
+    // Append the assistant’s messages to the transcript and display them
+    const assistantMessages = (resultJson.messages || []).filter(m => m.role === 'assistant');
+    for (const msg of assistantMessages) {
+      transcript.messages.push(msg);
+      // Print the content
+      if (typeof msg.content === 'string') {
+        console.log(msg.content);
+      } else if (Array.isArray(msg.content)) {
+        msg.content.forEach(segment => {
+          if (typeof segment === 'string') {
+            console.log(segment);
+          } else {
+            console.log(`[Attachment returned: ${JSON.stringify(segment)}]`);
+          }
+        });
+      } else {
+        console.log(String(msg.content));
+      }
+    }
+  }
+
+  rl.close();
+}
+
+// -----------------------------------------------------------------------------
 // 6) "transcribe" Subcommand
 // -----------------------------------------------------------------------------
 async function commandTranscribe(globalFlags, cmdArgs) {
   if (cmdArgs.length === 0) {
-    console.error('[ERROR] No PDF file specified.');
+    console.error('[ERROR] No file specified. Expecting a .pdf or .docx file.');
     process.exit(1);
   }
-  const pdfPath = cmdArgs[0];
-  if (!pdfPath.toLowerCase().endsWith('.pdf')) {
-    console.error('[ERROR] "transcribe" expects a .pdf file input.');
-    process.exit(1);
+  const inputFile = cmdArgs[0];
+  const ext = path.extname(inputFile).toLowerCase();
+
+  let outputPath;
+  if (ext === '.pdf') {
+    outputPath = inputFile.replace(/\.pdf$/i, '.pdf.doc.json');
+  } else if (ext === '.docx') {
+    outputPath = inputFile.replace(/\.docx$/i, '.docx.doc.json');
+  } else {
+    outputPath = inputFile + '.doc.json';
   }
 
-  let outputPath = pdfPath.replace(/\.pdf$/i, '.doc.json');
   let description = null;
   let intent = null;
   let graphicInstructions = null;
@@ -388,18 +497,16 @@ async function commandTranscribe(globalFlags, cmdArgs) {
     }
   }
 
-  // Read PDF into memory
-  let pdfBuffer;
+  let fileBuffer;
   try {
-    pdfBuffer = fs.readFileSync(pdfPath);
+    fileBuffer = fs.readFileSync(inputFile);
   } catch (err) {
-    console.error(`[ERROR] Could not read file at ${pdfPath}`, err.message);
+    console.error(`[ERROR] Could not read file at ${inputFile}`, err.message);
     process.exit(1);
   }
 
-  // Build form data
   const form = new FormData();
-  form.append('file', pdfBuffer, path.basename(pdfPath));
+  form.append('file', fileBuffer, path.basename(inputFile));
   form.append('model', globalFlags.model);
 
   if (description) form.append('description', description);
@@ -409,7 +516,7 @@ async function commandTranscribe(globalFlags, cmdArgs) {
   if (!pageNumbering) form.append('page_numbering', 'false');
   if (ocrThreshold !== null) form.append('ocr_threshold', ocrThreshold);
 
-  console.log('Starting PDF conversion with options:\n', {
+  console.log('Starting document conversion with options:\n', {
     model: globalFlags.model,
     description,
     intent,
@@ -419,7 +526,6 @@ async function commandTranscribe(globalFlags, cmdArgs) {
     ocr_threshold: ocrThreshold
   });
 
-  // Compute content length
   let length;
   try {
     length = form.getLengthSync();
@@ -427,6 +533,7 @@ async function commandTranscribe(globalFlags, cmdArgs) {
     console.error('[ERROR] form.getLengthSync() failed:', err.message);
     process.exit(1);
   }
+
   const headers = {
     ...form.getHeaders(),
     'Content-Length': length
@@ -453,11 +560,10 @@ async function commandTranscribe(globalFlags, cmdArgs) {
     }
     jobId = result.job_id;
   } catch (err) {
-    console.error('[ERROR] Failed to start PDF conversion:', err.message);
+    console.error('[ERROR] Failed to start document conversion:', err.message);
     process.exit(1);
   }
 
-  // Poll for progress
   const statusUrl = `http://${globalFlags.hostname}:${globalFlags.port}${globalFlags.baseUrlPrefix}/api/charmonizer/v1/conversions/documents/${jobId}`;
   const resultUrl = `${statusUrl}/result`;
 
@@ -491,7 +597,6 @@ async function commandTranscribe(globalFlags, cmdArgs) {
     }
   }
 
-  // Fetch final doc object
   let finalDoc;
   try {
     const resp = await fetch(resultUrl);
@@ -510,10 +615,9 @@ async function commandTranscribe(globalFlags, cmdArgs) {
     process.exit(1);
   }
 
-  // Write output
   try {
     fs.writeFileSync(outputPath, JSON.stringify(finalDoc, null, 2), 'utf-8');
-    console.log(`Saved final doc to ${outputPath}`);
+    console.log(`Saved final doc object to ${outputPath}`);
   } catch (err) {
     console.error('[ERROR] Could not write output:', err.message);
     process.exit(1);
@@ -530,7 +634,6 @@ async function commandExtractMarkdown(globalFlags, cmdArgs) {
   }
   const inputPath = cmdArgs[0];
 
-  // Default output path: replace extension with .md
   let defaultOutput = inputPath + '.md';
   const ext = path.extname(inputPath);
   if (ext) {
@@ -538,8 +641,6 @@ async function commandExtractMarkdown(globalFlags, cmdArgs) {
   }
 
   let outputPath = defaultOutput;
-
-  // Parse any local flags
   const localArgs = cmdArgs.slice(1);
   while (localArgs.length > 0) {
     const token = localArgs.shift();
@@ -553,7 +654,6 @@ async function commandExtractMarkdown(globalFlags, cmdArgs) {
     }
   }
 
-  // Validate that the file exists
   let fileBuffer;
   try {
     fileBuffer = fs.readFileSync(inputPath);
@@ -562,13 +662,11 @@ async function commandExtractMarkdown(globalFlags, cmdArgs) {
     process.exit(1);
   }
 
-  // Build the form data
   const form = new FormData();
   form.append('file', fileBuffer, path.basename(inputPath));
 
   const endpoint = `http://${globalFlags.hostname}:${globalFlags.port}${globalFlags.baseUrlPrefix}/api/charmonator/v1/conversion/file`;
 
-  // POST to /conversion/file
   let responseJson;
   try {
     const length = form.getLengthSync();
@@ -593,13 +691,11 @@ async function commandExtractMarkdown(globalFlags, cmdArgs) {
     process.exit(1);
   }
 
-  // Expect {"markdownContent": "..."}
   if (!responseJson || typeof responseJson.markdownContent !== 'string') {
     console.error('[ERROR] Response missing "markdownContent" field.');
     process.exit(1);
   }
 
-  // Write the Markdown output
   try {
     fs.writeFileSync(outputPath, responseJson.markdownContent, 'utf-8');
     console.log(`Extracted markdown saved to: ${outputPath}`);
@@ -612,8 +708,6 @@ async function commandExtractMarkdown(globalFlags, cmdArgs) {
 // -----------------------------------------------------------------------------
 // 8) "convert-server-config" Subcommand
 // -----------------------------------------------------------------------------
-
-// Helper to prompt user for a yes/no answer.
 function promptYesNo(question) {
   const rl = readline.createInterface({
     input: process.stdin,
@@ -634,7 +728,6 @@ async function commandConvertServerConfig(globalFlags, cmdArgs) {
   }
   const serverConfigPath = cmdArgs[0];
 
-  // Read server config
   let serverConf;
   try {
     const raw = fs.readFileSync(serverConfigPath, 'utf-8');
@@ -644,27 +737,26 @@ async function commandConvertServerConfig(globalFlags, cmdArgs) {
     process.exit(1);
   }
 
-  // Build minimal local config
   const localConf = {};
 
-  // 1) Pull port from serverConf.server.port if present
+  // 1) Pull port
   if (serverConf.server && typeof serverConf.server.port === 'number') {
     localConf.port = serverConf.server.port;
   } else {
     localConf.port = 5002;
   }
 
-  // 2) Use hostname = 'localhost' by default
+  // 2) Use hostname = 'localhost'
   localConf.hostname = 'localhost';
 
-  // 3) If there's a baseUrl like "/ai2", turn that into 'ai2' for baseUrlPrefix
+  // 3) baseUrl => baseUrlPrefix
   const rawBaseUrl =
     serverConf.server && serverConf.server.baseUrl
       ? serverConf.server.baseUrl
       : '/ai2';
   localConf.baseUrlPrefix = rawBaseUrl.replace(/^\/+/, '');
 
-  // 4) Attempt to pick a default model (first in serverConf.models) or fallback
+  // 4) default model
   if (serverConf.models && typeof serverConf.models === 'object') {
     const modelNames = Object.keys(serverConf.models);
     if (modelNames.length > 0) {
@@ -675,11 +767,9 @@ async function commandConvertServerConfig(globalFlags, cmdArgs) {
     localConf.model = 'gpt-4o-mini';
   }
 
-  // Prepare directory & path for writing
   const charmDir = path.join(os.homedir(), '.config', 'charm');
   const localPath = path.join(charmDir, 'config.json');
 
-  // If config file already exists, confirm overwriting
   if (fs.existsSync(localPath)) {
     console.log(`[INFO] A local config file already exists at: ${localPath}`);
     const answer = await promptYesNo('Overwrite? [y/N]: ');
@@ -692,10 +782,9 @@ async function commandConvertServerConfig(globalFlags, cmdArgs) {
   try {
     fs.mkdirSync(charmDir, { recursive: true });
   } catch (err) {
-    // might fail if the directory already exists
+    // ignore if already exists
   }
 
-  // Write local config
   try {
     fs.writeFileSync(localPath, JSON.stringify(localConf, null, 2), 'utf-8');
     console.log(`Wrote local charm config to: ${localPath}`);
@@ -707,7 +796,502 @@ async function commandConvertServerConfig(globalFlags, cmdArgs) {
 }
 
 // -----------------------------------------------------------------------------
-// 9) Helpers
+// 9) "chunk" Subcommand
+// -----------------------------------------------------------------------------
+async function commandChunk(globalFlags, cmdArgs) {
+  let inputPath = null;
+  let strategy = null;
+  let chunkSize = null;
+  let inputChunkGroupName = 'all';
+  let outputChunkGroupName = 'rechunked';
+  let inline = false;
+  let outputPath = null;
+  let pollInterval = 3;
+
+  const localArgs = [...cmdArgs];
+  while (localArgs.length > 0) {
+    const token = localArgs.shift();
+    if (token === '--input') {
+      inputPath = localArgs.shift();
+    } else if (token === '--strategy') {
+      strategy = localArgs.shift();
+    } else if (token === '--chunk-size') {
+      chunkSize = parseInt(localArgs.shift(), 10);
+    } else if (token === '--input-chunk-group-name') {
+      inputChunkGroupName = localArgs.shift();
+    } else if (token === '--output-chunk-group-name') {
+      outputChunkGroupName = localArgs.shift();
+    } else if (token === '--inline') {
+      inline = true;
+    } else if (token === '--output') {
+      outputPath = localArgs.shift();
+    } else if (token === '--poll-interval') {
+      pollInterval = parseFloat(localArgs.shift());
+    } else {
+      console.error(`[ERROR] Unknown flag for "chunk": ${token}`);
+      process.exit(1);
+    }
+  }
+
+  if (!inputPath) {
+    console.error('[ERROR] You must specify --input <file.json>.');
+    process.exit(1);
+  }
+  if (!strategy) {
+    console.error('[ERROR] You must specify --strategy (e.g. "merge_and_split").');
+    process.exit(1);
+  }
+  if (!chunkSize || chunkSize <= 0) {
+    console.error('[ERROR] You must specify a positive --chunk-size (in tokens).');
+    process.exit(1);
+  }
+
+  if (!outputPath) {
+    if (inline) {
+      outputPath = inputPath;
+    } else {
+      outputPath = inputPath.replace(/\.json$/i, '') + '.chunk.json';
+    }
+  }
+
+  let docObj;
+  try {
+    const text = fs.readFileSync(inputPath, 'utf-8');
+    docObj = JSON.parse(text);
+  } catch (err) {
+    console.error(`[ERROR] Could not read/parse input JSON file: ${inputPath}\n`, err.message);
+    process.exit(1);
+  }
+
+  const body = {
+    document: docObj,
+    strategy,
+    chunk_size: chunkSize,
+    chunk_group: inputChunkGroupName
+  };
+
+  const endpoint = `http://${globalFlags.hostname}:${globalFlags.port}${globalFlags.baseUrlPrefix}/api/charmonizer/v1/chunkings`;
+  let jobId;
+  try {
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error(`[ERROR] chunking job request => HTTP ${resp.status} => ${errText}`);
+      process.exit(1);
+    }
+    const json = await resp.json();
+    jobId = json.job_id;
+    if (!jobId) {
+      console.error('[ERROR] Server did not return a job_id.');
+      process.exit(1);
+    }
+    console.log(`Chunking job started. job_id=${jobId}`);
+  } catch (err) {
+    console.error('[ERROR] Failed to submit chunking job:', err.message);
+    process.exit(1);
+  }
+
+  const statusUrl = `http://${globalFlags.hostname}:${globalFlags.port}${globalFlags.baseUrlPrefix}/api/charmonizer/v1/chunkings/${jobId}`;
+  const resultUrl = `${statusUrl}/result`;
+
+  while (true) {
+    await sleep(pollInterval);
+
+    let statusRes;
+    try {
+      const resp = await fetch(statusUrl);
+      if (!resp.ok) {
+        const errText = await resp.text();
+        console.error(`[ERROR] Poll => HTTP ${resp.status} => ${errText}`);
+        process.exit(1);
+      }
+      statusRes = await resp.json();
+    } catch (err) {
+      console.error('[ERROR] Polling chunking job failed:', err.message);
+      process.exit(1);
+    }
+
+    if (statusRes.status === 'error') {
+      console.error('[ERROR] Chunking job failed:', statusRes.error || '(Unknown error)');
+      process.exit(1);
+    } else if (statusRes.status === 'complete') {
+      console.log('Chunking job complete! Fetching final result...');
+      break;
+    } else {
+      console.log(`Status: ${statusRes.status}, progress=${statusRes.progress || 0}%`);
+    }
+  }
+
+  let finalResult;
+  try {
+    const resp = await fetch(resultUrl);
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error(`[ERROR] Could not get final chunk result => HTTP ${resp.status} => ${errText}`);
+      process.exit(1);
+    }
+    finalResult = await resp.json();
+  } catch (err) {
+    console.error('[ERROR] Failed to retrieve chunk result:', err.message);
+    process.exit(1);
+  }
+
+  const newChunkArray = (finalResult.chunks || []).map((item, idx) => {
+    return {
+      id: docObj.id + '/' + outputChunkGroupName + '@' + idx,
+      parent: docObj.id,
+      content: item.chunk_data.body,
+      metadata: {
+        chunk_index: item.chunk_index,
+        title: item.chunk_data.title
+      }
+    };
+  });
+
+  if (inline) {
+    if (!docObj.chunks) {
+      docObj.chunks = {};
+    }
+    docObj.chunks[outputChunkGroupName] = newChunkArray;
+    try {
+      fs.writeFileSync(outputPath, JSON.stringify(docObj, null, 2), 'utf-8');
+      console.log(`Wrote updated doc (with new chunk group "${outputChunkGroupName}") to: ${outputPath}`);
+    } catch (err) {
+      console.error('[ERROR] Could not write output file:', err.message);
+      process.exit(1);
+    }
+  } else {
+    const newDoc = {
+      id: docObj.id,
+      content: docObj.content || '',
+      metadata: docObj.metadata || {},
+      chunks: {}
+    };
+    newDoc.chunks[outputChunkGroupName] = newChunkArray;
+    try {
+      fs.writeFileSync(outputPath, JSON.stringify(newDoc, null, 2), 'utf-8');
+      console.log(`Wrote new JSON document with chunk group "${outputChunkGroupName}" to: ${outputPath}`);
+    } catch (err) {
+      console.error('[ERROR] Could not write output file:', err.message);
+      process.exit(1);
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 10) "summarize" Subcommand
+// -----------------------------------------------------------------------------
+/**
+ * This command orchestrates a summarization job against the /summaries endpoint.
+ * By default, it does a "map" style summarization (summarizing each chunk individually).
+ *
+ * Flags include inline and file-based variants for:
+ *   --merge-summaries-guidance / --merge-summaries-guidance-file
+ *   --initial-summary         / --initial-summary-file
+ *   --json-schema             / --json-schema-file
+ *
+ * Usage example:
+ *   charm summarize
+ *     --input doc.json
+ *     --method map
+ *     --chunk-group pages
+ *     --context-chunks-before 0
+ *     --context-chunks-after 0
+ *     --guidance "Please keep these summaries short."
+ *     --temperature 0.7
+ *     --annotation-field summary
+ *     --annotation-field-delta summary_delta
+ *     --merge-summaries-guidance "Combine partial summaries carefully."
+ *     --merge-summaries-guidance-file guidance.txt
+ *     --initial-summary "Seed text"
+ *     --initial-summary-file seed.txt
+ *     --json-schema schema.json
+ *     --json-schema-file alt-schema.json
+ *     --inline
+ *     --output-file out.doc.json
+ *     --poll-interval 3
+ */
+async function commandSummarize(globalFlags, cmdArgs) {
+  // Default parameter values
+  let inputPath = null;
+  let method = 'map'; // defaults to chunk-wise summarization
+  let chunkGroup = 'pages';
+  let contextBefore = 0;
+  let contextAfter = 0;
+  let guidance = null;
+  let temperature = null;
+  let annotationField = 'summary';
+  let annotationFieldDelta = 'summary_delta';
+
+  // We'll store either inline or file-based versions:
+  let mergeSummariesGuidance = null;
+  let initialSummary = null;
+
+  // For JSON schema, we can have an inline path or a -file version:
+  let jsonSchemaPath = null;
+
+  let inline = false;
+  let outputFile = null;
+  let pollInterval = 3;
+
+  const localArgs = [...cmdArgs];
+  while (localArgs.length > 0) {
+    const token = localArgs.shift();
+    switch (token) {
+      case '--input':
+        inputPath = localArgs.shift();
+        break;
+      case '--method':
+        method = localArgs.shift();
+        break;
+      case '--chunk-group':
+        chunkGroup = localArgs.shift();
+        break;
+      case '--context-chunks-before':
+        contextBefore = parseInt(localArgs.shift(), 10);
+        break;
+      case '--context-chunks-after':
+        contextAfter = parseInt(localArgs.shift(), 10);
+        break;
+      case '--guidance':
+        guidance = localArgs.shift();
+        break;
+      case '--temperature':
+        temperature = parseFloat(localArgs.shift());
+        break;
+      case '--annotation-field':
+        annotationField = localArgs.shift();
+        break;
+      case '--annotation-field-delta':
+        annotationFieldDelta = localArgs.shift();
+        break;
+
+      // --- Merge Summaries Guidance ---
+      case '--merge-summaries-guidance':
+        if (mergeSummariesGuidance) {
+          console.error('[ERROR] Already specified merge-summaries-guidance; cannot repeat.');
+          process.exit(1);
+        }
+        mergeSummariesGuidance = localArgs.shift();
+        break;
+      case '--merge-summaries-guidance-file':
+        if (mergeSummariesGuidance) {
+          console.error('[ERROR] Cannot combine --merge-summaries-guidance with --merge-summaries-guidance-file.');
+          process.exit(1);
+        }
+        {
+          const filePath = localArgs.shift();
+          try {
+            mergeSummariesGuidance = fs.readFileSync(filePath, 'utf-8');
+          } catch (err) {
+            console.error(`[ERROR] Could not read file for --merge-summaries-guidance-file: ${filePath}\n`, err.message);
+            process.exit(1);
+          }
+        }
+        break;
+
+      // --- Initial Summary ---
+      case '--initial-summary':
+        if (initialSummary) {
+          console.error('[ERROR] Already specified initial-summary; cannot repeat.');
+          process.exit(1);
+        }
+        initialSummary = localArgs.shift();
+        break;
+      case '--initial-summary-file':
+        if (initialSummary) {
+          console.error('[ERROR] Cannot combine --initial-summary with --initial-summary-file.');
+          process.exit(1);
+        }
+        {
+          const filePath = localArgs.shift();
+          try {
+            initialSummary = fs.readFileSync(filePath, 'utf-8');
+          } catch (err) {
+            console.error(`[ERROR] Could not read file for --initial-summary-file: ${filePath}\n`, err.message);
+            process.exit(1);
+          }
+        }
+        break;
+
+      // --- JSON Schema (inline or file) ---
+      case '--json-schema':
+        if (jsonSchemaPath) {
+          console.error('[ERROR] Already specified a schema source; cannot combine --json-schema with --json-schema-file.');
+          process.exit(1);
+        }
+        // We'll treat this as a file path (existing behavior).
+        jsonSchemaPath = localArgs.shift();
+        break;
+      case '--json-schema-file':
+        if (jsonSchemaPath) {
+          console.error('[ERROR] Already specified a schema source; cannot combine --json-schema with --json-schema-file.');
+          process.exit(1);
+        }
+        jsonSchemaPath = localArgs.shift();
+        break;
+
+      // --- Output & Misc ---
+      case '--inline':
+        inline = true;
+        break;
+      case '--output-file':
+        outputFile = localArgs.shift();
+        break;
+      case '--poll-interval':
+        pollInterval = parseFloat(localArgs.shift());
+        break;
+      default:
+        console.error(`[ERROR] Unknown flag for "summarize": ${token}`);
+        process.exit(1);
+    }
+  }
+
+  if (!inputPath) {
+    console.error('[ERROR] You must specify --input <doc.json>.');
+    process.exit(1);
+  }
+  // Decide on final output path if user didn't specify
+  if (!inline && !outputFile) {
+    // e.g. mydoc.doc.json => mydoc.summarized.doc.json
+    outputFile = inputPath.replace(/\.doc\.json$/i, '') + '.summarized.doc.json';
+  }
+
+  // Read the input doc
+  let docObj;
+  try {
+    const text = fs.readFileSync(inputPath, 'utf-8');
+    docObj = JSON.parse(text);
+  } catch (err) {
+    console.error(`[ERROR] Could not read/parse: ${inputPath}\n`, err.message);
+    process.exit(1);
+  }
+
+  // Build request body
+  const body = {
+    document: docObj,
+    method,
+    model: globalFlags.model
+  };
+  // For "map", we need chunk_group:
+  if (method !== 'full') {
+    body.chunk_group = chunkGroup;
+    body.context_chunks_before = contextBefore;
+    body.context_chunks_after = contextAfter;
+  }
+  if (guidance) body.guidance = guidance;
+  if (typeof temperature === 'number') body.temperature = temperature;
+  if (annotationField) body.annotation_field = annotationField;
+  if (annotationFieldDelta) body.annotation_field_delta = annotationFieldDelta;
+  if (mergeSummariesGuidance) body.merge_summaries_guidance = mergeSummariesGuidance;
+  if (initialSummary) body.initial_summary = initialSummary;
+
+  // If user supplied a JSON schema path:
+  if (jsonSchemaPath) {
+    try {
+      const raw = fs.readFileSync(jsonSchemaPath, 'utf-8');
+      const parsedSchema = JSON.parse(raw);
+      body.json_schema = parsedSchema;
+    } catch (err) {
+      console.error(`[ERROR] Could not read/parse JSON schema file: ${jsonSchemaPath}\n`, err.message);
+      process.exit(1);
+    }
+  }
+
+  // Submit summarization job
+  const endpoint = `http://${globalFlags.hostname}:${globalFlags.port}${globalFlags.baseUrlPrefix}/api/charmonizer/v1/summaries`;
+  let jobId;
+  try {
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error(`[ERROR] Summarization job => HTTP ${resp.status} => ${errText}`);
+      process.exit(1);
+    }
+    const json = await resp.json();
+    jobId = json.job_id;
+    if (!jobId) {
+      console.error('[ERROR] Server did not return a job_id.');
+      process.exit(1);
+    }
+    console.log(`Summarization job started. job_id=${jobId}`);
+  } catch (err) {
+    console.error('[ERROR] Failed to submit summarization job:', err.message);
+    process.exit(1);
+  }
+
+  // Poll for completion
+  const statusUrl = `${endpoint}/${jobId}`;
+  const resultUrl = `${statusUrl}/result`;
+  while (true) {
+    await sleep(pollInterval);
+    let statusRes;
+    try {
+      const resp = await fetch(statusUrl);
+      if (!resp.ok) {
+        const errText = await resp.text();
+        console.error(`[ERROR] Poll => HTTP ${resp.status} => ${errText}`);
+        process.exit(1);
+      }
+      statusRes = await resp.json();
+    } catch (err) {
+      console.error('[ERROR] Polling summarization job failed:', err.message);
+      process.exit(1);
+    }
+    if (statusRes.status === 'error') {
+      console.error('[ERROR] Summarization job failed:', statusRes.error || '(No error detail)');
+      process.exit(1);
+    } else if (statusRes.status === 'complete') {
+      console.log('Summarization job complete! Fetching final result...');
+      break;
+    } else {
+      console.log(`Status: ${statusRes.status}, chunks_completed=${statusRes.chunks_completed || 0}/` +
+                  `${statusRes.chunks_total || 0}...`);
+    }
+  }
+
+  // Fetch final summarized doc
+  let finalDoc;
+  try {
+    const resp = await fetch(resultUrl);
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error(`[ERROR] Could not get final summary => HTTP ${resp.status} => ${errText}`);
+      process.exit(1);
+    }
+    finalDoc = await resp.json();
+  } catch (err) {
+    console.error('[ERROR] Failed to retrieve summarization result:', err.message);
+    process.exit(1);
+  }
+
+  // Write output
+  let targetPath = outputFile || inputPath; // fallback if inline
+  if (inline) {
+    // If user didn't explicitly give --output-file, we overwrite the input
+    if (!outputFile) {
+      targetPath = inputPath;
+    }
+  }
+  try {
+    fs.writeFileSync(targetPath, JSON.stringify(finalDoc, null, 2), 'utf-8');
+    console.log(`Wrote summarized doc to: ${targetPath}`);
+  } catch (err) {
+    console.error('[ERROR] Could not write output file:', err.message);
+    process.exit(1);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// X) Show Help
 // -----------------------------------------------------------------------------
 function showHelp() {
   console.log(`
@@ -715,7 +1299,7 @@ Usage:
   charm [global-flags] <command> [options...]
 
 Global Flags:
-  --base-url-prefix <prefix>   (Default: "ai2" or config override)
+  --base-url-prefix <prefix>   (Default: "/charm" or config override)
   --model <modelName>          (Default: "gpt-4o-mini" or config override)
   --port <number>              (Default: 5002 or config override)
   --hostname <name>            (Default: "localhost" or config override)
@@ -728,7 +1312,11 @@ Commands:
     --force-response-json-schema <file>
     --attach <file>       (Attach image(s) to the user message)
 
-  transcribe <file>.pdf [flags]
+  chat [flags]
+    --system <file>       (Load system instructions from file)
+    (Enters an interactive chat loop. Type "quit" or "exit" to stop.)
+
+  transcribe <file>.pdf|.docx [flags]
     --output <file>
     --description <string>
     --intent <string>
@@ -745,6 +1333,36 @@ Commands:
     Generates a minimal ~/.config/charm/config.json for the CLI
     based on the server config (used by charmonator/charmonizer).
 
+  chunk [flags]
+    --input <doc.json>
+    --strategy <string>            (e.g. "merge_and_split")
+    --chunk-size <int>             (max tokens per chunk)
+    --input-chunk-group-name <str> (defaults to "all")
+    --output-chunk-group-name <str>(defaults to "rechunked")
+    --inline
+    --output <file>
+    --poll-interval <seconds>      (default=3)
+
+  summarize [flags]
+    --input <doc.json>
+    --method <full|map|fold|delta-fold|map-merge|merge>
+    --chunk-group <str>           (for non-"full" methods)
+    --context-chunks-before <int>
+    --context-chunks-after <int>
+    --guidance <string>
+    --temperature <float>
+    --annotation-field <str>
+    --annotation-field-delta <str>
+    --merge-summaries-guidance <str>
+    --merge-summaries-guidance-file <file>
+    --initial-summary <str>
+    --initial-summary-file <file>
+    --json-schema <file>
+    --json-schema-file <file>
+    --inline
+    --output-file <path>
+    --poll-interval <seconds>      (default=3)
+
 Examples:
   charm run "Hello"
   charm run --attach cat.png "Here's my cat!"
@@ -752,24 +1370,37 @@ Examples:
   charm transcribe mydoc.pdf --description "A PDF doc" --poll-interval 5
   charm extract-markdown sample.pdf
   charm convert-server-config /path/to/server/config.json
+
+  charm chat --system system.md
+
+  charm chunk --input mydoc.doc.json --strategy merge_and_split --chunk-size 1000
+              --input-chunk-group-name pages
+              --output-chunk-group-name splittedPages
+              --inline
+              --output mydoc.updated.json
+
+  charm summarize
+    --input mydoc.doc.json
+    --method map
+    --chunk-group pages
+    --context-chunks-before 0
+    --context-chunks-after 0
+    --guidance "Keep it short."
+    --temperature 0.7
+    --annotation-field "summary"
+    --annotation-field-delta "summary_delta"
+    --merge-summaries-guidance "Some single-line text"
+    --merge-summaries-guidance-file guidance.txt
+    --initial-summary-file seed.txt
+    --json-schema-file schema.json
+    --inline
+    --output-file final.doc.json
+    --poll-interval 3
 `);
 }
 
-function sleep(seconds) {
-  return new Promise(resolve => setTimeout(resolve, seconds * 1000));
-}
-
-async function readAllStdin() {
-  const rl = readline.createInterface({ input: process.stdin });
-  let data = '';
-  for await (const line of rl) {
-    data += line + '\n';
-  }
-  return data.trim();
-}
-
 // -----------------------------------------------------------------------------
-// 10) Main
+// Main
 // -----------------------------------------------------------------------------
 async function main() {
   if (command === 'help' || command === null) {
@@ -781,6 +1412,9 @@ async function main() {
     case 'run':
       await commandRun(finalGlobalFlags, cmdArgs);
       break;
+    case 'chat':
+      await commandChat(finalGlobalFlags, cmdArgs);
+      break;
     case 'transcribe':
       await commandTranscribe(finalGlobalFlags, cmdArgs);
       break;
@@ -789,6 +1423,12 @@ async function main() {
       break;
     case 'convert-server-config':
       await commandConvertServerConfig(finalGlobalFlags, cmdArgs);
+      break;
+    case 'chunk':
+      await commandChunk(finalGlobalFlags, cmdArgs);
+      break;
+    case 'summarize':
+      await commandSummarize(finalGlobalFlags, cmdArgs);
       break;
     default:
       console.error(`[ERROR] Unknown command: ${command}`);
