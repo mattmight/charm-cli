@@ -212,7 +212,7 @@ export async function commandRun(globalFlags, cmdArgs) {
     payload.options = invocationOptions;
   }
 
-  const endpoint = `http://${globalFlags.hostname}:${globalFlags.port}${globalFlags.baseUrlPrefix}/api/charmonator/v1/chat/extend_transcript`;
+  const endpoint = `http://${globalFlags.hostname}:${globalFlags.port}${globalFlags.baseUrlPrefix}/api/charmonator/v1/transcript/extension`;
   try {
     const response = await fetch(endpoint, {
       method: 'POST',
@@ -246,7 +246,7 @@ export async function commandRun(globalFlags, cmdArgs) {
       }
     }
   } catch (err) {
-    console.error('[ERROR] Failed to call /chat/extend_transcript:', err.message);
+    console.error('[ERROR] Failed to call /transcript/extension:', err.message);
     process.exit(1);
   }
 }
