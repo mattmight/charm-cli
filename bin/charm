@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-
 /* charm.mjs (the main entry point) */
 
 import fs from 'fs';
@@ -8,11 +7,6 @@ import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 
-/* 
-   We'll import commands from ./commands.
-   We'll also import "showHelp" from help.mjs and 
-   "parseArgs", "finalGlobalFlags" from a small utility or inline here.
-*/
 import { commandRun } from './commands/run.mjs';
 import { commandChat } from './commands/chat.mjs';
 import { commandTranscribe } from './commands/transcribe.mjs';
@@ -20,10 +14,10 @@ import { commandExtractMarkdown } from './commands/extract-markdown.mjs';
 import { commandConvertServerConfig } from './commands/convert-server-config.mjs';
 import { commandChunk } from './commands/chunk.mjs';
 import { commandSummarize } from './commands/summarize.mjs';
-import { showHelp } from './help.mjs';
+import { commandList } from './commands/list.mjs';
+import { commandMergeTranscriptions } from './commands/merge-transcriptions.mjs'; // <-- ADDED
 
-/* If you have shared parse logic or config loading, 
-   either inline or move into a small helper module. Here we keep it inline. */
+import { showHelp } from './help.mjs';
 
 // Helper to load user config from ~/.config/charm/config.json
 function loadUserConfig() {
@@ -40,13 +34,15 @@ function loadUserConfig() {
   return userConfig;
 }
 
-// Merge global flags from user config with defaults
+// Default config
 const defaultConfig = {
   port: 5002,
   hostname: 'localhost',
   baseUrlPrefix: '/charm',
   model: 'gpt-4o-mini'
 };
+
+// Merge user config
 const userConfig = loadUserConfig();
 const mergedConfig = { ...defaultConfig, ...userConfig };
 
@@ -118,7 +114,7 @@ if (typeof parsed._global.model === 'string') {
 const command = parsed.command || 'help';
 const cmdArgs = parsed.commandArgs;
 
-// The main driver
+// Main driver
 async function main() {
   if (command === 'help' || command === null) {
     showHelp();
@@ -147,6 +143,12 @@ async function main() {
     case 'summarize':
       await commandSummarize(finalGlobalFlags, cmdArgs);
       break;
+    case 'list':
+      await commandList(finalGlobalFlags, cmdArgs);
+      break;
+    case 'merge-transcriptions': // <-- ADDED
+      await commandMergeTranscriptions(finalGlobalFlags, cmdArgs);
+      break;
     default:
       console.error(`[ERROR] Unknown command: ${command}`);
       showHelp();
@@ -154,7 +156,6 @@ async function main() {
   }
 }
 
-// Run main
 main().catch(err => {
   console.error('[ERROR] Uncaught exception:', err);
   process.exit(1);

@@ -17,7 +17,7 @@ Commands:
     --input-file <file>
     --force-response-format <format>
     --force-response-json-schema <file>
-    --attach <file>  (Attach image(s))
+    --attach <file>
     --system-template-file <file>
     --system-param <name> <value>
     --system-param-file <name> <file>
@@ -46,8 +46,8 @@ Commands:
 
   chunk [flags]
     --input <doc.json>
-    --strategy <string>  
-    --chunk-size <int>   
+    --strategy <string>
+    --chunk-size <int>
     --input-chunk-group-name <str>
     --output-chunk-group-name <str>
     --inline
@@ -75,6 +75,15 @@ Commands:
     --output-file <path>
     --poll-interval <seconds>
 
+  list
+    (Lists available models from the server.)
+
+  merge-transcriptions [flags] <doc1.doc.json> <doc2.doc.json>...
+    --output <file>
+    --chunk-group <str>
+    --poll-interval <seconds>
+    (Merges multiple .doc.json transcriptions into a single merged doc.)
+
 Examples:
   charm run "Hello"
   charm run --attach cat.png "Here's my cat!"
@@ -85,5 +94,7 @@ Examples:
   charm chat --system system.md
   charm chunk --input mydoc.doc.json --strategy merge_and_split --chunk-size 1000
   charm summarize --input mydoc.doc.json --method map ...
+  charm list
+  charm merge-transcriptions --output final.doc.json scan1.doc.json scan2.doc.json
 `);
 }
