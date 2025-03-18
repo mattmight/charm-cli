@@ -42,7 +42,7 @@ Commands:
   extract-markdown <file> [flags]
     --output <file>
 
-  convert-server-config <path-to-charm-server-conf/config.json>
+  convert-server-config <path-to-charmonator-server-conf/config.json>
 
   chunk [flags]
     --input <doc.json>
@@ -90,7 +90,7 @@ Examples:
   charm --model gpt-4o run --system system.md --force-response-format json_object "Time?"
   charm transcribe mydoc.pdf --description "A PDF doc" --poll-interval 5
   charm extract-markdown sample.pdf
-  charm convert-server-config /path/to/server/config.json
+  charm convert-server-config /path/to/charmonator/server/config.json
   charm chat --system system.md
   charm chunk --input mydoc.doc.json --strategy merge_and_split --chunk-size 1000
   charm summarize --input mydoc.doc.json --method map ...
