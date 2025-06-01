@@ -38,6 +38,7 @@ Commands:
     --no-page-numbering
     --ocr-threshold <float>
     --poll-interval <seconds>
+    --continue-on-failure
 
   extract-markdown <file> [flags]
     --output <file>
@@ -89,6 +90,7 @@ Examples:
   charm run --attach cat.png "Here's my cat!"
   charm --model gpt-4o run --system system.md --force-response-format json_object "Time?"
   charm transcribe mydoc.pdf --description "A PDF doc" --poll-interval 5
+  charm transcribe mydoc.pdf --continue-on-failure --description "Medical document"
   charm extract-markdown sample.pdf
   charm convert-server-config /path/to/charmonator/server/config.json
   charm chat --system system.md
