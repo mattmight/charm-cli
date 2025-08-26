@@ -29,7 +29,7 @@ Commands:
     --system <file>
     (Enters an interactive chat loop. Type "quit" or "exit" to stop.)
 
-  transcribe <file>.pdf|.docx [flags]
+  transcribe <file>.pdf|.docx|batch.txt [flags]
     --output <file>
     --description <string>
     --intent <string>
@@ -39,6 +39,9 @@ Commands:
     --ocr-threshold <float>
     --poll-interval <seconds>
     --continue-on-failure
+    --output-format <doc.json|md>
+    --input-document-type <medical>
+    --batch
 
   extract-markdown <file> [flags]
     --output <file>
@@ -91,6 +94,8 @@ Examples:
   charm --model gpt-4o run --system system.md --force-response-format json_object "Time?"
   charm transcribe mydoc.pdf --description "A PDF doc" --poll-interval 5
   charm transcribe mydoc.pdf --continue-on-failure --description "Medical document"
+  charm transcribe mydoc.pdf --output-format md --input-document-type medical
+  charm transcribe batch-files.txt --batch --continue-on-failure --output-format md
   charm extract-markdown sample.pdf
   charm convert-server-config /path/to/charmonator/server/config.json
   charm chat --system system.md

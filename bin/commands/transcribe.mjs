@@ -12,7 +12,6 @@ export async function commandTranscribe(globalFlags, cmdArgs) {
     process.exit(1);
   }
   const inputFile = cmdArgs[0];
-  const ext = path.extname(inputFile).toLowerCase();
 
   let description = null;
   let intent = null;
@@ -24,6 +23,7 @@ export async function commandTranscribe(globalFlags, cmdArgs) {
   let continueOnFailure = false;
   let outputFormat = 'doc.json';
   let inputDocumentType = null;
+  let batchMode = false;
 
   let outputPath;
 
@@ -76,11 +76,100 @@ export async function commandTranscribe(globalFlags, cmdArgs) {
           process.exit(1);
         }
         break;
+      case '--batch':
+        batchMode = true;
+        break;
       default:
         console.error(`[ERROR] Unknown flag for "transcribe": ${token}`);
         process.exit(1);
     }
   }
+
+  // Handle batch mode
+  if (batchMode) {
+    let batchFileList;
+    try {
+      const batchFileContent = fs.readFileSync(inputFile, 'utf-8');
+      batchFileList = batchFileContent.split('\n')
+        .map(line => line.trim())
+        .filter(line => line.length > 0);
+    } catch (err) {
+      console.error(`[ERROR] Could not read batch file at ${inputFile}: ${err.message}`);
+      process.exit(1);
+    }
+
+    if (batchFileList.length === 0) {
+      console.error('[ERROR] Batch file is empty.');
+      process.exit(1);
+    }
+
+    console.log(`Processing ${batchFileList.length} files in batch mode...`);
+
+    for (let i = 0; i < batchFileList.length; i++) {
+      const currentFile = batchFileList[i];
+      console.log(`\n[${i + 1}/${batchFileList.length}] Processing: ${currentFile}`);
+      
+      try {
+        await transcribeSingleFile(currentFile, {
+          description,
+          intent,
+          graphicInstructions,
+          detectDocBoundaries,
+          pageNumbering,
+          ocrThreshold,
+          pollInterval,
+          continueOnFailure,
+          outputFormat,
+          inputDocumentType,
+          outputPath: null // Let each file calculate its own output path
+        }, globalFlags);
+      } catch (err) {
+        if (continueOnFailure) {
+          console.error(`[WARN] Failed to process ${currentFile}: ${err.message}`);
+        } else {
+          console.error(`[ERROR] Failed to process ${currentFile}: ${err.message}`);
+          process.exit(1);
+        }
+      }
+    }
+
+    console.log(`\nBatch processing complete. Processed ${batchFileList.length} files.`);
+    return;
+  }
+
+  // Single file mode - process the individual file
+  await transcribeSingleFile(inputFile, {
+    description,
+    intent,
+    graphicInstructions,
+    detectDocBoundaries,
+    pageNumbering,
+    ocrThreshold,
+    pollInterval,
+    continueOnFailure,
+    outputFormat,
+    inputDocumentType,
+    outputPath
+  }, globalFlags);
+}
+
+// Helper function to transcribe a single file
+async function transcribeSingleFile(inputFile, options, globalFlags) {
+  const ext = path.extname(inputFile).toLowerCase();
+  
+  let {
+    description,
+    intent,
+    graphicInstructions,
+    detectDocBoundaries,
+    pageNumbering,
+    ocrThreshold,
+    pollInterval,
+    continueOnFailure,
+    outputFormat,
+    inputDocumentType,
+    outputPath
+  } = options;
 
   // Apply document type presets after parsing all arguments
   if (inputDocumentType === 'medical') {
@@ -111,8 +200,7 @@ export async function commandTranscribe(globalFlags, cmdArgs) {
   try {
     fileBuffer = fs.readFileSync(inputFile);
   } catch (err) {
-    console.error(`[ERROR] Could not read file at ${inputFile}`, err.message);
-    process.exit(1);
+    throw new Error(`Could not read file at ${inputFile}: ${err.message}`);
   }
 
   const form = new FormData();
@@ -131,8 +219,7 @@ export async function commandTranscribe(globalFlags, cmdArgs) {
   try {
     length = form.getLengthSync();
   } catch (err) {
-    console.error('[ERROR] form.getLengthSync() failed:', err.message);
-    process.exit(1);
+    throw new Error(`form.getLengthSync() failed: ${err.message}`);
   }
 
   const headers = {
@@ -151,18 +238,15 @@ export async function commandTranscribe(globalFlags, cmdArgs) {
     });
     if (!response.ok) {
       const errBody = await response.text();
-      console.error(`[ERROR] HTTP ${response.status} => ${errBody}`);
-      process.exit(1);
+      throw new Error(`HTTP ${response.status} => ${errBody}`);
     }
     const result = await response.json();
     if (!result.job_id) {
-      console.error('[ERROR] No job_id returned by the server.');
-      process.exit(1);
+      throw new Error('No job_id returned by the server.');
     }
     jobId = result.job_id;
   } catch (err) {
-    console.error('[ERROR] Failed to start document conversion:', err.message);
-    process.exit(1);
+    throw new Error(`Failed to start document conversion: ${err.message}`);
   }
 
   const statusUrl = `http://${globalFlags.hostname}:${globalFlags.port}${globalFlags.baseUrlPrefix}/api/charmonizer/v1/conversions/documents/${jobId}`;
@@ -178,13 +262,11 @@ export async function commandTranscribe(globalFlags, cmdArgs) {
       const resp = await fetch(statusUrl);
       if (!resp.ok) {
         const errBody = await resp.text();
-        console.error(`[ERROR] Polling => HTTP ${resp.status} => ${errBody}`);
-        process.exit(1);
+        throw new Error(`Polling => HTTP ${resp.status} => ${errBody}`);
       }
       statusRes = await resp.json();
     } catch (err) {
-      console.error('[ERROR] Polling job status failed:', err.message);
-      process.exit(1);
+      throw new Error(`Polling job status failed: ${err.message}`);
     }
 
     if (statusRes.status === 'error') {
@@ -193,8 +275,7 @@ export async function commandTranscribe(globalFlags, cmdArgs) {
         finalDoc = await createPartialResultFromError(statusRes, inputFile, globalFlags);
         break;
       } else {
-        console.error('[ERROR] Job error:', statusRes.error);
-        process.exit(1);
+        throw new Error(`Job error: ${statusRes.error}`);
       }
     } else if (statusRes.status === 'complete') {
       console.log('Conversion complete! Fetching final result...');
@@ -215,16 +296,14 @@ export async function commandTranscribe(globalFlags, cmdArgs) {
           console.log('[WARN] Could not retrieve final result, but --continue-on-failure specified. Creating partial result...');
           finalDoc = await createPartialResultFromHttpError(resp.status, errBody, inputFile, globalFlags);
         } else {
-          console.error(`[ERROR] Could not retrieve final => HTTP ${resp.status} => ${errBody}`);
-          process.exit(1);
+          throw new Error(`Could not retrieve final => HTTP ${resp.status} => ${errBody}`);
         }
       } else if (resp.status === 202) {
         if (continueOnFailure) {
           console.log('[WARN] Still processing, but --continue-on-failure specified. Creating partial result...');
           finalDoc = await createPartialResultFromTimeout(inputFile, globalFlags);
         } else {
-          console.warn('[WARN] Still processing, got 202. Exiting with error code.');
-          process.exit(1);
+          throw new Error('Still processing, got 202.');
         }
       } else {
         finalDoc = await resp.json();
@@ -234,8 +313,7 @@ export async function commandTranscribe(globalFlags, cmdArgs) {
         console.log('[WARN] Failed to fetch final doc object, but --continue-on-failure specified. Creating partial result...');
         finalDoc = await createPartialResultFromException(err, inputFile, globalFlags);
       } else {
-        console.error('[ERROR] Failed to fetch final doc object:', err.message);
-        process.exit(1);
+        throw new Error(`Failed to fetch final doc object: ${err.message}`);
       }
     }
   }
@@ -250,8 +328,7 @@ export async function commandTranscribe(globalFlags, cmdArgs) {
       console.log(`Saved final doc object to ${outputPath}`);
     }
   } catch (err) {
-    console.error('[ERROR] Could not write output:', err.message);
-    process.exit(1);
+    throw new Error(`Could not write output: ${err.message}`);
   }
 }
 
