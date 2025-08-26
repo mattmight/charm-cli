@@ -14,15 +14,6 @@ export async function commandTranscribe(globalFlags, cmdArgs) {
   const inputFile = cmdArgs[0];
   const ext = path.extname(inputFile).toLowerCase();
 
-  let outputPath;
-  if (ext === '.pdf') {
-    outputPath = inputFile.replace(/\.pdf$/i, '.pdf.doc.json');
-  } else if (ext === '.docx') {
-    outputPath = inputFile.replace(/\.docx$/i, '.docx.doc.json');
-  } else {
-    outputPath = inputFile + '.doc.json';
-  }
-
   let description = null;
   let intent = null;
   let graphicInstructions = null;
@@ -31,6 +22,10 @@ export async function commandTranscribe(globalFlags, cmdArgs) {
   let ocrThreshold = 1.0;
   let pollInterval = 3;
   let continueOnFailure = false;
+  let outputFormat = 'doc.json';
+  let inputDocumentType = null;
+
+  let outputPath;
 
   const localArgs = cmdArgs.slice(1);
   while (localArgs.length > 0) {
@@ -67,9 +62,48 @@ export async function commandTranscribe(globalFlags, cmdArgs) {
       case '--continue-on-failure':
         continueOnFailure = true;
         break;
+      case '--output-format':
+        outputFormat = localArgs.shift();
+        if (!['doc.json', 'md'].includes(outputFormat)) {
+          console.error('[ERROR] Invalid --output-format. Must be "doc.json" or "md".');
+          process.exit(1);
+        }
+        break;
+      case '--input-document-type':
+        inputDocumentType = localArgs.shift();
+        if (!['medical'].includes(inputDocumentType)) {
+          console.error('[ERROR] Invalid --input-document-type. Must be "medical".');
+          process.exit(1);
+        }
+        break;
       default:
         console.error(`[ERROR] Unknown flag for "transcribe": ${token}`);
         process.exit(1);
+    }
+  }
+
+  // Apply document type presets after parsing all arguments
+  if (inputDocumentType === 'medical') {
+    // Only set these if they weren't explicitly provided by the user
+    if (description === null) {
+      description = "A document as part of a medical record collection.";
+    }
+    if (intent === null) {
+      intent = "To come up with a diagnosis, a prognosis or a treatment option based on the content of the records.";
+    }
+    if (graphicInstructions === null) {
+      graphicInstructions = "Clearly describe the contents of graphics, images and figures as it could relate to the diagnosis, prognosis or potential treatment of this patient.";
+    }
+  }
+
+  // Calculate output path after parsing arguments
+  if (!outputPath) {
+    if (ext === '.pdf') {
+      outputPath = inputFile.replace(/\.pdf$/i, outputFormat === 'md' ? '.pdf.md' : '.pdf.doc.json');
+    } else if (ext === '.docx') {
+      outputPath = inputFile.replace(/\.docx$/i, outputFormat === 'md' ? '.docx.md' : '.docx.doc.json');
+    } else {
+      outputPath = inputFile + (outputFormat === 'md' ? '.md' : '.doc.json');
     }
   }
 
@@ -207,12 +241,58 @@ export async function commandTranscribe(globalFlags, cmdArgs) {
   }
 
   try {
-    fs.writeFileSync(outputPath, JSON.stringify(finalDoc, null, 2), 'utf-8');
-    console.log(`Saved final doc object to ${outputPath}`);
+    if (outputFormat === 'md') {
+      const markdownContent = convertDocToMarkdown(finalDoc);
+      fs.writeFileSync(outputPath, markdownContent, 'utf-8');
+      console.log(`Saved markdown file to ${outputPath}`);
+    } else {
+      fs.writeFileSync(outputPath, JSON.stringify(finalDoc, null, 2), 'utf-8');
+      console.log(`Saved final doc object to ${outputPath}`);
+    }
   } catch (err) {
     console.error('[ERROR] Could not write output:', err.message);
     process.exit(1);
   }
+}
+
+// Helper function to convert a document object to markdown
+function convertDocToMarkdown(docObject) {
+  if (!docObject) {
+    return '# Error\n\nNo document content available.';
+  }
+
+  let markdown = '';
+
+  // Add document metadata as HTML comment if available
+  if (docObject.metadata) {
+    const meta = docObject.metadata;
+    markdown += '<!--\n';
+    if (meta.originating_filename) markdown += `filename: ${meta.originating_filename}\n`;
+    if (meta.document_sha256) markdown += `sha256: ${meta.document_sha256}\n`;
+    if (meta.size_bytes) markdown += `size: ${meta.size_bytes} bytes\n`;
+    if (meta.transcription_status) markdown += `status: ${meta.transcription_status}\n`;
+    markdown += '-->\n\n';
+  }
+
+  // Add main document content if available
+  if (docObject.content) {
+    markdown += docObject.content + '\n\n';
+  }
+
+  // Add page content from chunks if available
+  if (docObject.chunks && docObject.chunks.pages) {
+    for (const page of docObject.chunks.pages) {
+      if (page.content) {
+        // Add page separator for multi-page documents
+        if (docObject.chunks.pages.length > 1 && page.metadata && page.metadata.page_number) {
+          markdown += `<!-- Page ${page.metadata.page_number} -->\n\n`;
+        }
+        markdown += page.content + '\n\n';
+      }
+    }
+  }
+
+  return markdown.trim();
 }
 
 // Helper function to create a partial result document when transcription fails
