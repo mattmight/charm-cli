@@ -16,6 +16,7 @@ import { commandChunk } from './commands/chunk.mjs';
 import { commandSummarize } from './commands/summarize.mjs';
 import { commandList } from './commands/list.mjs';
 import { commandMergeTranscriptions } from './commands/merge-transcriptions.mjs'; // <-- ADDED
+import { commandConvert } from './commands/convert.mjs';
 
 import { showHelp } from './help.mjs';
 
@@ -148,6 +149,9 @@ async function main() {
       break;
     case 'merge-transcriptions': // <-- ADDED
       await commandMergeTranscriptions(finalGlobalFlags, cmdArgs);
+      break;
+    case 'convert':
+      await commandConvert(finalGlobalFlags, cmdArgs);
       break;
     default:
       console.error(`[ERROR] Unknown command: ${command}`);
