@@ -88,8 +88,10 @@ Commands:
     --poll-interval <seconds>
     (Merges multiple .doc.json transcriptions into a single merged doc.)
 
-  convert <input-file> <output-file>
-    (Converts files between different formats. Currently supported: .doc.json -> .md)
+  convert <input-file> [<output-file>] [flags]
+    --to <extension>
+    (Converts files between formats. Use --to flag for auto-naming or specify output file.)
+    (Supported conversions: .doc.json -> .md, .docx -> .md)
 
 Examples:
   charm run "Hello"
@@ -107,5 +109,7 @@ Examples:
   charm list
   charm merge-transcriptions --output final.doc.json scan1.doc.json scan2.doc.json
   charm convert document.doc.json output.md
+  charm convert document.doc.json --to md
+  charm convert document.docx --to md
 `);
 }
