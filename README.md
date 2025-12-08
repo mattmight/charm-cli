@@ -1,8 +1,14 @@
 # charm-cli
 
-A command-line interface, `charm`, that wraps around endpoints in the charmonator and charmonizer APIs.
+This project, `charm-cli`, provides a command-line interface, `charm`, that wraps around endpoints in the [charmonator and charmonizer APIs].
 
-It also provides tools for analysing and manipulating the data objects returned by the API.
+[charmonator and charmonizer APIs]: https://github.com/CHARM-BDF/charmonator/blob/main/docs/api-docs.md
+
+
+It also provides tools for analysing and manipulating the data objects returned by the API, including [JSON Document Objects].
+
+[JSON Document Objects]: https://github.com/CHARM-BDF/charmonator/blob/main/docs/document.md
+
 
 
 To use this tool, you must have a charm server running.

@@ -17,6 +17,9 @@ import { commandSummarize } from './commands/summarize.mjs';
 import { commandList } from './commands/list.mjs';
 import { commandMergeTranscriptions } from './commands/merge-transcriptions.mjs'; // <-- ADDED
 import { commandConvert } from './commands/convert.mjs';
+import { commandAppend } from './commands/append.mjs';
+import { commandTransmogrify } from './commands/transmogrify.mjs';
+import { commandJsonDoc } from './commands/json-doc.mjs';
 
 import { showHelp } from './help.mjs';
 
@@ -152,6 +155,15 @@ async function main() {
       break;
     case 'convert':
       await commandConvert(finalGlobalFlags, cmdArgs);
+      break;
+    case 'append':
+      await commandAppend(finalGlobalFlags, cmdArgs);
+      break;
+    case 'transmogrify':
+      await commandTransmogrify(finalGlobalFlags, cmdArgs);
+      break;
+    case 'json-doc':
+      await commandJsonDoc(finalGlobalFlags, cmdArgs);
       break;
     default:
       console.error(`[ERROR] Unknown command: ${command}`);

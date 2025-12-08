@@ -1,20 +1,67 @@
 /* commands/run.mjs */
 import fs from 'fs';
+import path from 'path';
 import FormData from 'form-data';
 import fetch from 'node-fetch';
+import { parse } from 'csv-parse/sync';
 import {
   readAllStdin,
   makeImageAttachment
 } from '../utils.mjs';
 
+/**
+ * Parse CSV content and format as a text table
+ */
+function formatCsvAsTable(csvContent) {
+  try {
+    const records = parse(csvContent, {
+      columns: true,
+      skip_empty_lines: true,
+      trim: true
+    });
+
+    if (records.length === 0) {
+      return csvContent; // Return original if empty
+    }
+
+    const columns = Object.keys(records[0]);
+
+    // Calculate column widths
+    const widths = columns.map(col => {
+      const maxDataWidth = Math.max(
+        ...records.map(row => String(row[col] || '').length)
+      );
+      return Math.max(col.length, maxDataWidth);
+    });
+
+    // Build header
+    const header = columns.map((col, i) => col.padEnd(widths[i])).join(' | ');
+    const separator = widths.map(w => '-'.repeat(w)).join('-+-');
+
+    // Build rows
+    const rows = records.map(row =>
+      columns.map((col, i) => String(row[col] || '').padEnd(widths[i])).join(' | ')
+    );
+
+    // Combine all parts
+    return `CSV data (${records.length} rows):\n\n${header}\n${separator}\n${rows.join('\n')}`;
+  } catch (err) {
+    // If parsing fails, return original content
+    console.warn('[WARN] Failed to parse CSV, using raw content:', err.message);
+    return csvContent;
+  }
+}
+
 export async function commandRun(globalFlags, cmdArgs) {
-  let systemFile = null;
+  let systemPrompt = null;  // Direct system prompt text via --system
+  let systemFile = null;    // System prompt file via --system-file
   let userInputFile = null;
   let forceFormat = null;
   let forceSchemaFile = null;
   let leftoverMessage = null;
 
   const attachments = [];
+  const csvAttachments = []; // Separate array for CSV files
   const localArgs = [...cmdArgs];
 
   // Templating
@@ -35,6 +82,8 @@ export async function commandRun(globalFlags, cmdArgs) {
   while (localArgs.length > 0) {
     const token = localArgs.shift();
     if (token === '--system') {
+      systemPrompt = localArgs.shift();
+    } else if (token === '--system-file') {
       systemFile = localArgs.shift();
     } else if (token === '--input-file') {
       userInputFile = localArgs.shift();
@@ -48,12 +97,23 @@ export async function commandRun(globalFlags, cmdArgs) {
         console.error('[ERROR] --attach requires a file path argument.');
         process.exit(1);
       }
-      const attachObj = makeImageAttachment(attachPath);
-      if (!attachObj) {
-        console.error(`[ERROR] Could not attach file: ${attachPath}`);
-        process.exit(1);
+
+      const ext = path.extname(attachPath).toLowerCase();
+
+      // Handle CSV files separately (add to text content, not as attachments)
+      if (ext === '.csv') {
+        const rawContent = fs.readFileSync(attachPath, 'utf-8');
+        const formattedContent = formatCsvAsTable(rawContent);
+        csvAttachments.push(formattedContent);
+      } else {
+        // Handle images as attachments
+        const attachObj = makeImageAttachment(attachPath);
+        if (!attachObj) {
+          console.error(`[ERROR] Could not attach file: ${attachPath}`);
+          process.exit(1);
+        }
+        attachments.push(attachObj);
       }
-      attachments.push(attachObj);
 
     // Templates
     } else if (token === '--system-template-file') {
@@ -115,13 +175,40 @@ export async function commandRun(globalFlags, cmdArgs) {
 
   let userMessage = '';
   if (!inputTemplateFile) {
+    // Read from input file if provided
+    let fileContent = '';
+    if (userInputFile) {
+      const rawContent = fs.readFileSync(userInputFile, 'utf-8');
+      const ext = path.extname(userInputFile).toLowerCase();
+
+      // Handle CSV files specially
+      if (ext === '.csv') {
+        fileContent = formatCsvAsTable(rawContent);
+      } else {
+        fileContent = rawContent;
+      }
+    }
+
+    // Add CSV attachments to file content
+    if (csvAttachments.length > 0) {
+      const csvContent = csvAttachments.join('\n\n---\n\n');
+      fileContent = fileContent ? `${fileContent}\n\n---\n\n${csvContent}` : csvContent;
+    }
+
+    // Combine file content with leftover message or stdin
     if (leftoverMessage) {
-      userMessage = leftoverMessage.trim();
-    } else if (userInputFile) {
-      userMessage = fs.readFileSync(userInputFile, 'utf-8');
+      // If we have both file content and a message, combine them
+      if (fileContent) {
+        userMessage = `${fileContent}\n\n${leftoverMessage.trim()}`;
+      } else {
+        userMessage = leftoverMessage.trim();
+      }
+    } else if (fileContent) {
+      userMessage = fileContent;
     } else {
       userMessage = await readAllStdin();
     }
+
     if (!userMessage && attachments.length === 0) {
       console.error('[ERROR] No user message and no attachments provided.');
       process.exit(1);
@@ -150,7 +237,8 @@ export async function commandRun(globalFlags, cmdArgs) {
   } else {
     const arr = [];
     if (userContent) {
-      arr.push(userContent);
+      // Wrap text content in proper format
+      arr.push({ type: 'text', text: userContent });
     }
     for (const att of attachments) {
       arr.push(att);
@@ -159,8 +247,9 @@ export async function commandRun(globalFlags, cmdArgs) {
   }
 
   let systemText = null;
-  if (systemTemplateFile && systemFile) {
-    console.error('[ERROR] Cannot combine --system-template-file and --system <file>.');
+  const systemOptionsCount = [systemTemplateFile, systemFile, systemPrompt].filter(Boolean).length;
+  if (systemOptionsCount > 1) {
+    console.error('[ERROR] Cannot combine --system, --system-file, and --system-template-file. Use only one.');
     process.exit(1);
   } else if (systemTemplateFile) {
     try {
@@ -172,6 +261,8 @@ export async function commandRun(globalFlags, cmdArgs) {
     }
   } else if (systemFile) {
     systemText = fs.readFileSync(systemFile, 'utf-8');
+  } else if (systemPrompt) {
+    systemText = systemPrompt;
   }
 
   if (forceFormat && forceSchemaFile) {
@@ -213,6 +304,12 @@ export async function commandRun(globalFlags, cmdArgs) {
   }
 
   const endpoint = `http://${globalFlags.hostname}:${globalFlags.port}${globalFlags.baseUrlPrefix}/api/charmonator/v1/transcript/extension`;
+
+  // Debug logging
+  if (process.env.DEBUG_CHARM) {
+    console.error('[DEBUG] Payload:', JSON.stringify(payload, null, 2));
+  }
+
   try {
     const response = await fetch(endpoint, {
       method: 'POST',

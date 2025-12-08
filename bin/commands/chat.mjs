@@ -5,10 +5,14 @@ import readline from 'readline';
 import { questionAsync } from '../utils.mjs';
 
 export async function commandChat(globalFlags, cmdArgs) {
-  let systemFile = null;
+  let systemPrompt = null;  // Direct system prompt text via --system
+  let systemFile = null;    // System prompt file via --system-file
   const localArgs = [...cmdArgs];
   while (localArgs.length > 0) {
     if (localArgs[0] === '--system') {
+      localArgs.shift();
+      systemPrompt = localArgs.shift();
+    } else if (localArgs[0] === '--system-file') {
       localArgs.shift();
       systemFile = localArgs.shift();
     } else {
@@ -18,13 +22,18 @@ export async function commandChat(globalFlags, cmdArgs) {
   }
 
   let systemText = null;
-  if (systemFile) {
+  if (systemPrompt && systemFile) {
+    console.error('[ERROR] Cannot combine --system and --system-file. Use only one.');
+    process.exit(1);
+  } else if (systemFile) {
     try {
       systemText = fs.readFileSync(systemFile, 'utf-8');
     } catch (err) {
-      console.error(`[ERROR] Could not read --system file: ${systemFile}\n`, err.message);
+      console.error(`[ERROR] Could not read --system-file: ${systemFile}\n`, err.message);
       process.exit(1);
     }
+  } else if (systemPrompt) {
+    systemText = systemPrompt;
   }
 
   const transcript = { messages: [] };

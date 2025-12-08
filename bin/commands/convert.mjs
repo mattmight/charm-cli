@@ -73,13 +73,19 @@ export async function commandConvert(globalFlags, cmdArgs) {
   try {
     if (inputExt === '.json' && inputPath.endsWith('.doc.json') && outputExt === '.md') {
       await convertDocJsonToMarkdown(inputPath, outputPath);
+    } else if (inputExt === '.md' && outputPath.endsWith('.doc.json')) {
+      await convertMarkdownToDocJson(inputPath, outputPath);
     } else if (inputExt === '.docx' && outputExt === '.md') {
       await convertDocxToMarkdown(inputPath, outputPath, globalFlags);
+    } else if (inputExt === '.pptx' && outputExt === '.md') {
+      await convertPptxToMarkdown(inputPath, outputPath, globalFlags);
     } else {
       console.error(`[ERROR] Unsupported conversion: ${inputExt} to ${outputExt}`);
       console.error('Currently supported conversions:');
       console.error('  .doc.json -> .md');
+      console.error('  .md -> .doc.json');
       console.error('  .docx -> .md');
+      console.error('  .pptx -> .md');
       process.exit(1);
     }
   } catch (err) {
@@ -123,6 +129,93 @@ async function convertDocJsonToMarkdown(inputPath, outputPath) {
   try {
     fs.writeFileSync(outputPath, markdownContent, 'utf-8');
     console.log(`Converted ${inputPath} to ${outputPath}`);
+  } catch (err) {
+    throw new Error(`Failed to write output file: ${err.message}`);
+  }
+}
+
+async function convertMarkdownToDocJson(inputPath, outputPath) {
+  let markdownContent;
+  try {
+    markdownContent = fs.readFileSync(inputPath, 'utf-8');
+  } catch (err) {
+    throw new Error(`Failed to read input file: ${err.message}`);
+  }
+
+  // Generate document ID from filename
+  const crypto = await import('crypto');
+  const hash = crypto.createHash('sha256').update(markdownContent).digest('hex');
+  const docId = hash.substring(0, 16);
+
+  // Parse pages based on <!-- METADATA page_number: N --> markers
+  const pageRegex = /<!-- METADATA page_number: (\d+) -->/g;
+  const pageMarkers = [];
+  let match;
+
+  while ((match = pageRegex.exec(markdownContent)) !== null) {
+    pageMarkers.push({
+      pageNumber: parseInt(match[1], 10),
+      index: match.index
+    });
+  }
+
+  const pages = [];
+
+  if (pageMarkers.length === 0) {
+    // No page markers found, treat entire content as one page
+    pages.push({
+      id: `${docId}/pages@0`,
+      parent: docId,
+      start: 0,
+      length: markdownContent.length,
+      content: markdownContent,
+      metadata: {
+        page_number: 1
+      }
+    });
+  } else {
+    // Extract content between page markers
+    for (let i = 0; i < pageMarkers.length; i++) {
+      const startIdx = pageMarkers[i].index;
+      const endIdx = i + 1 < pageMarkers.length ? pageMarkers[i + 1].index : markdownContent.length;
+
+      // Find the end of the metadata line
+      const lineEndIdx = markdownContent.indexOf('\n', startIdx);
+      const contentStartIdx = lineEndIdx !== -1 ? lineEndIdx + 1 : startIdx;
+
+      // Get content, trimming the page boundary marker if present
+      let pageContent = markdownContent.substring(contentStartIdx, endIdx).trim();
+      pageContent = pageContent.replace(/<!-- page boundary -->\s*$/, '').trim();
+
+      pages.push({
+        id: `${docId}/pages@${i}`,
+        parent: docId,
+        start: startIdx,
+        length: endIdx - startIdx,
+        content: pageContent,
+        metadata: {
+          page_number: pageMarkers[i].pageNumber
+        }
+      });
+    }
+  }
+
+  const docJson = {
+    id: docId,
+    content: markdownContent,
+    metadata: {
+      originating_filename: path.basename(inputPath),
+      mimetype: 'text/markdown'
+    },
+    chunks: {
+      pages: pages
+    }
+  };
+
+  try {
+    fs.writeFileSync(outputPath, JSON.stringify(docJson, null, 2), 'utf-8');
+    console.log(`Converted ${inputPath} to ${outputPath}`);
+    console.log(`  Created ${pages.length} page chunks`);
   } catch (err) {
     throw new Error(`Failed to write output file: ${err.message}`);
   }
@@ -176,12 +269,12 @@ async function convertDocxToMarkdown(inputPath, outputPath, globalFlags) {
 
   const statusUrl = `http://${globalFlags.hostname}:${globalFlags.port}${globalFlags.baseUrlPrefix}/api/charmonizer/v1/conversions/documents/${jobId}`;
   const resultUrl = `${statusUrl}/result`;
-  
+
   const pollInterval = 3;
 
   while (true) {
     await sleep(pollInterval);
-    
+
     try {
       const resp = await fetch(statusUrl);
       if (!resp.ok) {
@@ -189,13 +282,13 @@ async function convertDocxToMarkdown(inputPath, outputPath, globalFlags) {
         throw new Error(`HTTP ${resp.status} => ${errBody}`);
       }
       const statusData = await resp.json();
-      
+
       if (statusData.status === 'complete' || statusData.status === 'completed') {
         break;
       } else if (statusData.status === 'failed') {
         throw new Error(`Conversion job failed: ${statusData.error || 'Unknown error'}`);
       }
-      
+
       console.log(`Conversion in progress... (status: ${statusData.status})`);
     } catch (err) {
       throw new Error(`Failed to check conversion status: ${err.message}`);
@@ -209,9 +302,9 @@ async function convertDocxToMarkdown(inputPath, outputPath, globalFlags) {
       throw new Error(`HTTP ${resp.status} => ${errBody}`);
     }
     const docJson = await resp.json();
-    
+
     let markdownContent = '';
-    
+
     if (docJson.markdownContent) {
       markdownContent = docJson.markdownContent;
     } else if (docJson.content) {
@@ -237,5 +330,63 @@ async function convertDocxToMarkdown(inputPath, outputPath, globalFlags) {
     console.log(`Converted ${inputPath} to ${outputPath}`);
   } catch (err) {
     throw new Error(`Failed to retrieve or write conversion result: ${err.message}`);
+  }
+}
+
+async function convertPptxToMarkdown(inputPath, outputPath, globalFlags) {
+  let fileBuffer;
+  try {
+    fileBuffer = fs.readFileSync(inputPath);
+  } catch (err) {
+    throw new Error(`Could not read file at ${inputPath}: ${err.message}`);
+  }
+
+  const form = new FormData();
+  form.append('file', fileBuffer, path.basename(inputPath));
+
+  let length;
+  try {
+    length = form.getLengthSync();
+  } catch (err) {
+    throw new Error(`form.getLengthSync() failed: ${err.message}`);
+  }
+
+  const headers = {
+    ...form.getHeaders(),
+    'Content-Length': length
+  };
+
+  const endpoint = `http://${globalFlags.hostname}:${globalFlags.port}${globalFlags.baseUrlPrefix}/api/charmonator/v1/conversion/file`;
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      body: form,
+      headers
+    });
+    if (!response.ok) {
+      const errBody = await response.text();
+      throw new Error(`HTTP ${response.status} => ${errBody}`);
+    }
+    const result = await response.json();
+
+    let markdownContent = '';
+
+    if (result.markdown) {
+      markdownContent = result.markdown;
+    } else if (result.markdownContent) {
+      markdownContent = result.markdownContent;
+    } else if (result.content) {
+      markdownContent = result.content;
+    } else if (result.text) {
+      markdownContent = result.text;
+    } else {
+      throw new Error('Could not find markdown content in the conversion result. Expected fields: markdown, markdownContent, content, or text.');
+    }
+
+    fs.writeFileSync(outputPath, markdownContent, 'utf-8');
+    console.log(`Converted ${inputPath} to ${outputPath}`);
+  } catch (err) {
+    throw new Error(`Failed to convert PowerPoint: ${err.message}`);
   }
 }
