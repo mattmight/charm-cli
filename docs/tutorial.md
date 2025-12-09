@@ -252,7 +252,7 @@ charm-cli is a command-line interface that makes it easy to interact with the ch
 Open a new terminal window and run:
 
 ```bash
-git clone https://github.com/CHARM-BDF/charm-cli.git
+git clone https://github.com/mattmight/charm-cli 
 cd charm-cli
 ```
 
