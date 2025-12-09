@@ -105,84 +105,110 @@ pip install python-pptx
 
 ---
 
-## Example 2: PDF to Markdown
+## Example 2: PDF to Markdown to FHIR to HTML
 
-**Location:** `examples/transmogrify/pdf-to-markdown/`
+**Location:** `examples/transmogrify/pdf-to-md-to-fhir-to-html/`
 
 ### Overview
 
-Convert PDF medical records (with text and images) into searchable markdown format using OCR and vision models.
+A complete medical records processing pipeline that converts PDF medical records through multiple stages:
+1. **PDF → Markdown**: OCR and vision model extraction
+2. **Markdown → FHIR JSON**: Structured FHIR R4 Bundle with schema validation
+3. **FHIR JSON → HTML**: Patient-friendly HTML report
 
 **Input:** 2-page PDF medical record with:
 - Scanned text pages
 - Medical forms
-- Clinical notes
+- Clinical notes (right knee sports medicine evaluation)
 
-**Output:** Markdown file with:
-- OCR-extracted text
-- Vision model descriptions of images/forms
-- Metadata (filename, SHA256, page numbers)
-- Page boundaries marked
-- Extraction confidence scores
+**Outputs:**
+- **Markdown file**: OCR-extracted text, vision model descriptions, metadata
+- **FHIR JSON**: R4 Bundle with Patient, Encounter, Procedure, Device resources
+- **HTML report**: Beautiful, patient-friendly visualization
 
 ### Files
 
 ```
-pdf-to-markdown/
-├── run.sh                              # Executable script
+pdf-to-md-to-fhir-to-html/
+├── run.sh                              # Step 1: PDF → Markdown
+├── run-to-fhir.sh                      # Step 2: Markdown → FHIR JSON
+├── run-to-html.sh                      # Step 3: FHIR JSON → HTML
+├── run-complete-pipeline.sh            # Complete pipeline (all steps)
 ├── README.md                           # Detailed documentation
-└── right-knee-sports-medicine.pdf      # 2-page medical record (261KB)
+├── right-knee-sports-medicine.pdf      # 2-page medical record (261KB)
+└── ortho-fhir.schema.json              # FHIR R4 Bundle schema
 ```
 
 ### Usage
 
-**Basic:**
+**Complete pipeline (recommended):**
 ```bash
-cd examples/transmogrify/pdf-to-markdown
-./run.sh
+cd examples/transmogrify/pdf-to-md-to-fhir-to-html
+./run-complete-pipeline.sh
 ```
 
-**With guidance:**
+**Step-by-step:**
 ```bash
+./run.sh           # PDF → Markdown
+./run-to-fhir.sh   # Markdown → FHIR JSON
+./run-to-html.sh   # FHIR JSON → HTML
+```
+
+**Manual commands:**
+```bash
+# Step 1: PDF to Markdown
 node ../../../bin/charm.mjs transmogrify \
   --to md \
   --guidance "Medical record with clinical assessment" \
   right-knee-sports-medicine.pdf
-```
 
-**Custom output:**
-```bash
-./run.sh --output medical-record.md
+# Step 2: Markdown to FHIR JSON
+node ../../../bin/charm.mjs transmogrify \
+  --to json \
+  --output-schema-file ortho-fhir.schema.json \
+  --guidance "Extract FHIR Bundle with Patient, Encounter, Procedure resources" \
+  right-knee-sports-medicine.md
+
+# Step 3: FHIR JSON to HTML
+node ../../../bin/charm.mjs transmogrify \
+  --to html \
+  --guidance "Create patient-friendly HTML report" \
+  right-knee-sports-medicine-fhir.json
 ```
 
 ### What It Demonstrates
 
+- ✅ **Multi-stage pipeline** - Chaining multiple transmogrify conversions
 - ✅ **Native endpoint usage** - Uses Charmonizer image PDF endpoint
 - ✅ **OCR processing** - Extracts text from scanned pages
 - ✅ **Vision models** - Describes images and forms
-- ✅ **Progress tracking** - Shows X/Y pages during conversion
-- ✅ **Metadata preservation** - Includes SHA256, page numbers
+- ✅ **FHIR extraction** - Structured healthcare data (R4 Bundle)
+- ✅ **Schema validation** - Validates against FHIR schema
+- ✅ **HTML generation** - Patient-friendly visualization
 - ✅ **Medical optimization** - Auto-adds clinical guidance
 
 ### Technical Details
 
-**Route used:** PDF conversion (Charmonizer endpoint)
+**Step 1 - PDF to Markdown:**
+- Route: PDF conversion (Charmonizer endpoint)
+- Submits to `/api/charmonizer/v1/conversions/documents`
+- Polls for completion, converts doc.json to markdown
+- Runtime: ~30-60 seconds for 2 pages
 
-**Process:**
-1. Submit PDF to `/api/charmonizer/v1/conversions/documents`
-2. Poll for completion (shows progress)
-3. Fetch result (doc.json format)
-4. Convert doc.json to markdown
-5. Add metadata as HTML comments
-6. Mark page boundaries
+**Step 2 - Markdown to FHIR JSON:**
+- Route: Compiler guide (generic-compiler)
+- Generates Python code to extract FHIR resources
+- Validates against `ortho-fhir.schema.json`
+- Creates Patient, Encounter, Procedure, Device, Specimen resources
+- Runtime: ~10-20 seconds
 
-**Medical document optimization:**
+**Step 3 - FHIR JSON to HTML:**
+- Route: Compiler guide
+- Generates HTML with styling
+- Patient-friendly presentation of medical data
+- Runtime: ~10-15 seconds
 
-When guidance contains keywords (`medical`, `patient`, `clinical`):
-- Adds clinical intent for diagnosis/treatment focus
-- Adds graphic instructions for medical images
-
-**Typical runtime:** 30-60 seconds for 2 pages
+**Total pipeline runtime:** ~1-2 minutes
 
 ---
 

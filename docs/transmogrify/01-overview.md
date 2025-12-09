@@ -255,7 +255,7 @@ charm-cli/
 │       └── description.md
 └── examples/transmogrify/      # Working examples
     ├── oncology-pptx/
-    ├── pdf-to-markdown/
+    ├── pdf-to-md-to-fhir-to-html/
     ├── csv-to-json/
     └── markdown-variants/
 ```

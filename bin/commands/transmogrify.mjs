@@ -60,8 +60,8 @@ export async function commandTransmogrify(globalFlags, cmdArgs) {
     }
 
     // Route 3: Guide-based conversion
-    const guidesDir = opts.guidesDir || getDefaultGuidesDir();
-    const guides = loadGuides(guidesDir);
+    const guidesDirs = buildGuidesDirs(globalFlags.guidesPath, opts.guidesDir);
+    const guides = loadGuides(guidesDirs);
 
     const guide = selectGuide(guides, opts.guide, fromFmt, toFmt);
     if (!guide) {
@@ -181,52 +181,87 @@ function getDefaultGuidesDir() {
 }
 
 /**
- * Load all guides from directory
+ * Build list of guides directories to search.
+ * @param {string|null} guidesPath - Colon-separated list of paths from --guides-path
+ * @param {string|null} guidesDir - Single path from --guides-dir (command-level override)
+ * @returns {string[]} Array of directories to search in order
  */
-function loadGuides(guidesDir) {
-  if (!fs.existsSync(guidesDir)) {
-    console.error(`[ERROR] Guides directory does not exist: ${guidesDir}`);
-    process.exit(EXIT_CODES.INVALID_FLAGS);
+function buildGuidesDirs(guidesPath, guidesDir) {
+  // If --guides-dir is specified, it takes full precedence (backwards compatibility)
+  if (guidesDir) {
+    return [guidesDir];
   }
 
+  const dirs = [];
+
+  // Add paths from --guides-path (colon-separated)
+  if (guidesPath) {
+    const paths = guidesPath.split(':').filter(p => p.trim());
+    dirs.push(...paths);
+  }
+
+  // Always add the default guides directory last
+  dirs.push(getDefaultGuidesDir());
+
+  return dirs;
+}
+
+/**
+ * Load all guides from multiple directories.
+ * @param {string[]} guidesDirs - Array of directories to search in order
+ * @returns {object[]} Array of loaded guide objects
+ */
+function loadGuides(guidesDirs) {
   const guides = [];
-  const entries = fs.readdirSync(guidesDir, { withFileTypes: true });
+  const seenNames = new Set();
 
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
+  for (const guidesDir of guidesDirs) {
+    if (!fs.existsSync(guidesDir)) {
+      continue; // Skip non-existent directories
+    }
 
-    const guidePath = path.join(guidesDir, entry.name);
-    const typeFile = path.join(guidePath, 'type.json');
+    const entries = fs.readdirSync(guidesDir, { withFileTypes: true });
 
-    if (!fs.existsSync(typeFile)) continue;
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
 
-    try {
-      const typeContent = fs.readFileSync(typeFile, 'utf-8').trim();
-      const typeObj = JSON.parse(typeContent);
+      // Skip if we've already seen a guide with this name (first one wins)
+      if (seenNames.has(entry.name)) continue;
 
-      // Skip guides not intended for transmogrify command
-      if (typeObj.command !== 'transmogrify') continue;
+      const guidePath = path.join(guidesDir, entry.name);
+      const typeFile = path.join(guidePath, 'type.json');
 
-      const inputsFile = path.join(guidePath, 'inputs.json');
-      const outputsFile = path.join(guidePath, 'outputs.json');
+      if (!fs.existsSync(typeFile)) continue;
 
-      if (!fs.existsSync(inputsFile) || !fs.existsSync(outputsFile)) {
-        console.warn(`[WARN] Guide ${entry.name} missing inputs.json or outputs.json`);
-        continue;
+      try {
+        const typeContent = fs.readFileSync(typeFile, 'utf-8').trim();
+        const typeObj = JSON.parse(typeContent);
+
+        // Skip guides not intended for transmogrify command
+        if (typeObj.command !== 'transmogrify') continue;
+
+        const inputsFile = path.join(guidePath, 'inputs.json');
+        const outputsFile = path.join(guidePath, 'outputs.json');
+
+        if (!fs.existsSync(inputsFile) || !fs.existsSync(outputsFile)) {
+          console.warn(`[WARN] Guide ${entry.name} missing inputs.json or outputs.json`);
+          continue;
+        }
+
+        const inputs = JSON.parse(fs.readFileSync(inputsFile, 'utf-8'));
+        const outputs = JSON.parse(fs.readFileSync(outputsFile, 'utf-8'));
+
+        guides.push({
+          name: entry.name,
+          path: guidePath,
+          type: typeObj.type,
+          inputs: inputs,
+          outputs: outputs
+        });
+        seenNames.add(entry.name);
+      } catch (err) {
+        console.warn(`[WARN] Failed to load guide ${entry.name}: ${err.message}`);
       }
-
-      const inputs = JSON.parse(fs.readFileSync(inputsFile, 'utf-8'));
-      const outputs = JSON.parse(fs.readFileSync(outputsFile, 'utf-8'));
-
-      guides.push({
-        name: entry.name,
-        path: guidePath,
-        type: typeObj.type,
-        inputs: inputs,
-        outputs: outputs
-      });
-    } catch (err) {
-      console.warn(`[WARN] Failed to load guide ${entry.name}: ${err.message}`);
     }
   }
 
@@ -1128,8 +1163,8 @@ async function dryRun(globalFlags, opts) {
   } else if (shouldUsePdfConversion(fromFmt, toFmt, opts.input)) {
     console.log('Route: PDF conversion (Charmonizer image PDF endpoint)');
   } else {
-    const guidesDir = opts.guidesDir || getDefaultGuidesDir();
-    const guides = loadGuides(guidesDir);
+    const guidesDirs = buildGuidesDirs(globalFlags.guidesPath, opts.guidesDir);
+    const guides = loadGuides(guidesDirs);
     const guide = selectGuide(guides, opts.guide, fromFmt, toFmt);
 
     if (guide) {

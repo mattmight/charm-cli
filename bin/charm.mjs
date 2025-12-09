@@ -23,9 +23,11 @@ import { commandJsonDoc } from './commands/json-doc.mjs';
 
 import { showHelp } from './help.mjs';
 
-// Helper to load user config from ~/.config/charm/config.json
-function loadUserConfig() {
-  const configPath = path.join(os.homedir(), '.config', 'charm', 'config.json');
+// Helper to load user config from a config file
+function loadUserConfig(configPath) {
+  if (!configPath) {
+    configPath = path.join(os.homedir(), '.config', 'charm', 'config.json');
+  }
   let userConfig = {};
   try {
     if (fs.existsSync(configPath)) {
@@ -45,10 +47,6 @@ const defaultConfig = {
   baseUrlPrefix: '/charm',
   model: 'gpt-4o-mini'
 };
-
-// Merge user config
-const userConfig = loadUserConfig();
-const mergedConfig = { ...defaultConfig, ...userConfig };
 
 // Parse CLI args
 function parseArgs(argv) {
@@ -81,6 +79,12 @@ function parseArgs(argv) {
       case '--hostname':
         parsed._global.hostname = args.shift();
         break;
+      case '--guides-path':
+        parsed._global.guidesPath = args.shift();
+        break;
+      case '--conf':
+        parsed._global.conf = args.shift();
+        break;
       default:
         console.error(`Unknown global flag: ${flag}`);
         process.exit(1);
@@ -94,6 +98,10 @@ function parseArgs(argv) {
 }
 
 const parsed = parseArgs(process.argv);
+
+// Merge user config (using custom path if specified)
+const userConfig = loadUserConfig(parsed._global.conf);
+const mergedConfig = { ...defaultConfig, ...userConfig };
 
 // Merge final global flags
 const finalGlobalFlags = {
@@ -113,6 +121,9 @@ if (typeof parsed._global.baseUrlPrefix === 'string') {
 }
 if (typeof parsed._global.model === 'string') {
   finalGlobalFlags.model = parsed._global.model;
+}
+if (typeof parsed._global.guidesPath === 'string') {
+  finalGlobalFlags.guidesPath = parsed._global.guidesPath;
 }
 
 const command = parsed.command || 'help';

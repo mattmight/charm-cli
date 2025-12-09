@@ -41,8 +41,10 @@ This uses the Charmonizer image PDF endpoint with:
 
 **Try it:**
 ```bash
-cd examples/transmogrify/pdf-to-markdown
-./run.sh
+cd examples/transmogrify/pdf-to-md-to-fhir-to-html
+./run.sh  # PDF → Markdown only
+# Or run complete pipeline:
+./run-complete-pipeline.sh  # PDF → MD → FHIR → HTML
 ```
 
 ### Example 2: Markdown to PowerPoint
@@ -273,7 +275,7 @@ cat examples/transmogrify/oncology-pptx/README.md
 **Available examples:**
 
 1. **oncology-pptx**: Markdown cancer case → PowerPoint
-2. **pdf-to-markdown**: PDF medical record → Markdown
+2. **pdf-to-md-to-fhir-to-html**: PDF medical record → Markdown → FHIR JSON → HTML
 3. **csv-to-json**: CSV data → Validated JSON
 4. **markdown-variants**: GFM → Obsidian markdown
 

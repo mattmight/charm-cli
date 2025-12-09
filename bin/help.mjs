@@ -10,6 +10,10 @@ Global Flags:
   --model <modelName>          (Default: "gpt-4o-mini" or config override)
   --port <number>              (Default: 5002 or config override)
   --hostname <name>            (Default: "localhost" or config override)
+  --guides-path <paths>        Colon-separated list of paths to search for guides
+                               (built-in ./guides/ is always searched last)
+  --conf <path>                Path to a custom config file
+                               (Default: ~/.config/charm/config.json)
 
 Commands:
   run [flags] [<user message>]

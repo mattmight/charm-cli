@@ -12,12 +12,53 @@ function getDefaultGuidesDir() {
   return path.join(__dirname, '..', '..', 'guides');
 }
 
-function loadSummarizerGuide(guideName, guidesDir) {
-  const guidePath = path.join(guidesDir, guideName);
+/**
+ * Build list of guides directories to search.
+ * @param {string|null} guidesPath - Colon-separated list of paths from --guides-path
+ * @param {string|null} guidesDir - Single path from --guides-dir (command-level override)
+ * @returns {string[]} Array of directories to search in order
+ */
+function buildGuidesDirs(guidesPath, guidesDir) {
+  // If --guides-dir is specified, it takes full precedence (backwards compatibility)
+  if (guidesDir) {
+    return [guidesDir];
+  }
 
-  if (!fs.existsSync(guidePath)) {
+  const dirs = [];
+
+  // Add paths from --guides-path (colon-separated)
+  if (guidesPath) {
+    const paths = guidesPath.split(':').filter(p => p.trim());
+    dirs.push(...paths);
+  }
+
+  // Always add the default guides directory last
+  dirs.push(getDefaultGuidesDir());
+
+  return dirs;
+}
+
+/**
+ * Load a summarizer guide by name, searching through multiple directories.
+ * @param {string} guideName - Name of the guide to load
+ * @param {string[]} guidesDirs - Array of directories to search in order
+ * @returns {object} The loaded guide object
+ */
+function loadSummarizerGuide(guideName, guidesDirs) {
+  let guidePath = null;
+
+  // Search through directories in order
+  for (const dir of guidesDirs) {
+    const candidate = path.join(dir, guideName);
+    if (fs.existsSync(candidate)) {
+      guidePath = candidate;
+      break;
+    }
+  }
+
+  if (!guidePath) {
     console.error(`[ERROR] Guide not found: ${guideName}`);
-    console.error(`[ERROR] Looked in: ${guidePath}`);
+    console.error(`[ERROR] Searched in: ${guidesDirs.join(', ')}`);
     process.exit(1);
   }
 
@@ -66,33 +107,46 @@ function loadSummarizerGuide(guideName, guidesDir) {
   return guide;
 }
 
-function listSummarizerGuides(guidesDir) {
-  if (!fs.existsSync(guidesDir)) {
-    return [];
-  }
-
+/**
+ * List all summarizer guides from multiple directories.
+ * @param {string[]} guidesDirs - Array of directories to search
+ * @returns {object[]} Array of guide objects with name and description
+ */
+function listSummarizerGuides(guidesDirs) {
   const guides = [];
-  const entries = fs.readdirSync(guidesDir, { withFileTypes: true });
+  const seenNames = new Set();
 
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
+  for (const guidesDir of guidesDirs) {
+    if (!fs.existsSync(guidesDir)) {
+      continue;
+    }
 
-    const guidePath = path.join(guidesDir, entry.name);
-    const typeFile = path.join(guidePath, 'type.json');
+    const entries = fs.readdirSync(guidesDir, { withFileTypes: true });
 
-    if (!fs.existsSync(typeFile)) continue;
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
 
-    try {
-      const typeObj = JSON.parse(fs.readFileSync(typeFile, 'utf-8'));
-      if (typeObj.command === 'summarize') {
-        const descFile = path.join(guidePath, 'description.md');
-        const description = fs.existsSync(descFile)
-          ? fs.readFileSync(descFile, 'utf-8').trim()
-          : '';
-        guides.push({ name: entry.name, description });
+      // Skip if we've already seen a guide with this name (first one wins)
+      if (seenNames.has(entry.name)) continue;
+
+      const guidePath = path.join(guidesDir, entry.name);
+      const typeFile = path.join(guidePath, 'type.json');
+
+      if (!fs.existsSync(typeFile)) continue;
+
+      try {
+        const typeObj = JSON.parse(fs.readFileSync(typeFile, 'utf-8'));
+        if (typeObj.command === 'summarize') {
+          const descFile = path.join(guidePath, 'description.md');
+          const description = fs.existsSync(descFile)
+            ? fs.readFileSync(descFile, 'utf-8').trim()
+            : '';
+          guides.push({ name: entry.name, description, path: guidesDir });
+          seenNames.add(entry.name);
+        }
+      } catch (err) {
+        // Skip invalid guides
       }
-    } catch (err) {
-      // Skip invalid guides
     }
   }
 
@@ -119,7 +173,7 @@ export async function commandSummarize(globalFlags, cmdArgs) {
   let pollInterval = 3;
 
   let guideName = null;
-  let guidesDir = getDefaultGuidesDir();
+  let guidesDir = null; // Command-level --guides-dir override
   let listGuides = false;
   let tokensBudget = null;
 
@@ -254,9 +308,12 @@ export async function commandSummarize(globalFlags, cmdArgs) {
     }
   }
 
+  // Build list of guides directories to search
+  const guidesDirs = buildGuidesDirs(globalFlags.guidesPath, guidesDir);
+
   // Handle --list-guides
   if (listGuides) {
-    const guides = listSummarizerGuides(guidesDir);
+    const guides = listSummarizerGuides(guidesDirs);
     if (guides.length === 0) {
       console.log('No summarizer guides found.');
     } else {
@@ -274,7 +331,7 @@ export async function commandSummarize(globalFlags, cmdArgs) {
   // Load guide if specified
   let guideSchema = null;
   if (guideName) {
-    const guide = loadSummarizerGuide(guideName, guidesDir);
+    const guide = loadSummarizerGuide(guideName, guidesDirs);
     console.log(`[INFO] Using guide: ${guideName}`);
 
     // Apply guide settings (can be overridden by explicit flags)
